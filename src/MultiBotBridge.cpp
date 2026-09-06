@@ -219,6 +219,9 @@ char const* const kSelfActionCapability = "SELF_ACTION_V1";
 char const* const kAltRosterCapability = "ALT_ROSTER_V1";
 char const* const kBotLifecycleCapability = "BOT_LIFECYCLE_V1";
 char const* const kBotTargetResolveCapability = "BOT_TARGET_RESOLVE_V1";
+char const* const kGearInspectCapability = "GEAR_INSPECT_V1";
+char const* const kDetailCapability = "DETAIL_V1";
+char const* const kStatsCapability = "STATS_V1";
 uint32 constexpr kMaxItemActionCount = 1000;
 uint32 constexpr kMaxInventoryItemMoveCount = 1000;
 uint32 constexpr kMaxInventoryItemTradeCount = 1000;
@@ -251,6 +254,7 @@ bool SendStateAddonPacket(Player* player, ChatMsg chatType, std::string const& o
 bool SendProtocolError(Player* player, ChatMsg chatType, std::string const& opcode, std::string const& requestType, std::string const& token, std::string const& reason);
 void SendOutfitPackets(Player* requester, ChatMsg replyType, std::string const& botName, std::string const& requestToken);
 void SendInventoryExactSnapshot(Player* requester, ChatMsg replyType, std::string const& botName, std::string const& requestToken);
+void SendGearInspectPackets(Player* requester, ChatMsg replyType, std::string const& botName, std::string const& requestToken);
 void RunInventoryItemMoveCommand(Player* requester, ChatMsg replyType, std::string const& botName, std::string const& requestToken, uint8 srcBag, uint8 srcSlot, uint32 srcItemId, uint32 srcCount, uint8 dstBag, uint8 dstSlot, uint32 dstItemId, uint32 dstCount);
 void RunInventoryItemTradeCommand(Player* requester, ChatMsg replyType, std::string const& botName, std::string const& requestToken, uint8 srcBag, uint8 srcSlot, uint32 srcItemId, uint32 srcCount);
 void RunInventoryItemDepositExactCommand(Player* requester, ChatMsg replyType, std::string const& botName, std::string const& requestToken, std::string const& actionValue, uint8 srcBag, uint8 srcSlot, uint32 srcItemId, uint32 srcCount);
@@ -341,7 +345,10 @@ bool SendCapabilitiesPackets(Player* player, ChatMsg chatType)
         kSelfActionCapability,
         kAltRosterCapability,
         kBotLifecycleCapability,
-        kBotTargetResolveCapability
+        kBotTargetResolveCapability,
+        kGearInspectCapability,
+        kDetailCapability,
+        kStatsCapability
     };
 
     std::vector<std::string> chunks;
@@ -1000,6 +1007,58 @@ std::string BuildBotDetailPayload(Player* bot)
         << detail.level << kFieldSeparator << detail.talentTabs[0] << kFieldSeparator << detail.talentTabs[1]
         << kFieldSeparator << detail.talentTabs[2] << kFieldSeparator << detail.itemLevelScore;
     return out.str();
+}
+
+void SendGearInspectPackets(
+    Player* requester,
+    ChatMsg replyType,
+    std::string const& botName,
+    std::string const& requestToken)
+{
+    std::string const trimmedBotName = Trim(botName);
+    Player* const bot = FindBotByName(requester, trimmedBotName);
+    std::string const effectiveBotName = bot ? bot->GetName() : trimmedBotName;
+    std::string const prefix = UrlEncodeField(effectiveBotName) + std::string(1, kFieldSeparator) + requestToken;
+
+    SendAddonPacket(requester, replyType, "GEAR_BEGIN", prefix);
+    if (!bot)
+    {
+        SendAddonPacket(requester, replyType, "GEAR_ERROR", prefix + std::string(1, kFieldSeparator) + "NO_BOT");
+        SendAddonPacket(requester, replyType, "GEAR_END", prefix);
+        return;
+    }
+
+    PlayerbotAI* const botAI = sPlayerbotsMgr.GetPlayerbotAI(bot);
+    if (!botAI || !botAI->GetSecurity() ||
+        !botAI->GetSecurity()->CheckLevelFor(PLAYERBOT_SECURITY_ALLOW_ALL, true, requester))
+    {
+        SendAddonPacket(requester, replyType, "GEAR_ERROR", prefix + std::string(1, kFieldSeparator) + "FORBIDDEN");
+        SendAddonPacket(requester, replyType, "GEAR_END", prefix);
+        return;
+    }
+
+    std::ostringstream summary;
+    summary << prefix << kFieldSeparator << BuildItemLevelScore(bot);
+    SendAddonPacket(requester, replyType, "GEAR_SUMMARY", summary.str());
+
+    for (uint8 slot = EQUIPMENT_SLOT_START; slot < EQUIPMENT_SLOT_END; ++slot)
+    {
+        if (slot == EQUIPMENT_SLOT_BODY)
+            continue;
+
+        Item* const item = bot->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
+        ItemTemplate const* const proto = item ? item->GetTemplate() : nullptr;
+        if (!item || !proto)
+            continue;
+
+        std::ostringstream payload;
+        payload << prefix << kFieldSeparator << static_cast<uint32>(slot)
+            << kFieldSeparator << proto->ItemId << kFieldSeparator << proto->ItemLevel
+            << kFieldSeparator << static_cast<uint32>(proto->Quality);
+        SendAddonPacket(requester, replyType, "GEAR_ITEM", payload.str());
+    }
+
+    SendAddonPacket(requester, replyType, "GEAR_END", prefix);
 }
 
 SkillLineAbilityEntry const* GetSkillLineAbilityForSpell(uint32 spellId)
@@ -12689,13 +12748,19 @@ bool HandleBridgeOpcode(Player* player, ChatMsg replyType, std::string const& op
 
         if (requestType == "DETAIL")
         {
-            if (fields.size() != 2)
+            if (fields.size() != 2 && fields.size() != 3)
                 return SendProtocolError(player, replyType, normalized, requestType, "", "BAD_FIELD_COUNT");
 
-            if (!IsValidCanonicalRawField(fields[1], kMaxBotNameLength, false))
-                return SendProtocolError(player, replyType, normalized, requestType, "", "BAD_BOT_NAME");
+            std::string const token = fields.size() == 3 ? GetSafeErrorToken(fields, 2) : "";
+            if (fields.size() == 3 && !IsValidRequestToken(fields[2]))
+                return SendProtocolError(player, replyType, normalized, requestType, "", "BAD_TOKEN");
 
-            SendAddonPacket(player, replyType, "DETAIL", BuildDetailPayload(player, fields[1]));
+            if (!IsValidCanonicalRawField(fields[1], kMaxBotNameLength, false))
+                return SendProtocolError(player, replyType, normalized, requestType, token, "BAD_BOT_NAME");
+
+            std::string const detailPayload = BuildDetailPayload(player, fields[1]);
+            SendAddonPacket(player, replyType, fields.size() == 3 ? "DETAIL_RESULT" : "DETAIL",
+                fields.size() == 3 ? token + std::string(1, kFieldSeparator) + detailPayload : detailPayload);
 
             std::string const professionPayload = BuildProfessionPayload(player, fields[1]);
             if (!professionPayload.empty())
@@ -12866,6 +12931,18 @@ bool HandleBridgeOpcode(Player* player, ChatMsg replyType, std::string const& op
 
         if (requestType == "PVP_STATS" || requestType == "STATS")
         {
+            if (requestType == "STATS" && fields.size() == 3)
+            {
+                std::string const token = GetSafeErrorToken(fields, 2);
+                if (!IsValidCanonicalRawField(fields[1], kMaxBotNameLength, false) ||
+                    !IsValidRequestToken(fields[2]))
+                    return SendProtocolError(player, replyType, normalized, requestType, token, "BAD_REQUEST");
+
+                SendAddonPacket(player, replyType, "STATS_RESULT",
+                    token + std::string(1, kFieldSeparator) + BuildStatsPayload(player, fields[1]));
+                return true;
+            }
+
             if (fields.size() != 1 && fields.size() != 2)
                 return SendProtocolError(player, replyType, normalized, requestType, "", "BAD_FIELD_COUNT");
 
@@ -12908,7 +12985,7 @@ bool HandleBridgeOpcode(Player* player, ChatMsg replyType, std::string const& op
             return true;
         }
 
-        if (requestType == "INVENTORY" || requestType == "INVENTORY_EXACT" || requestType == "BUYBACK" || requestType == "BANK" || requestType == "GBANK" ||
+        if (requestType == "GEAR" || requestType == "INVENTORY" || requestType == "INVENTORY_EXACT" || requestType == "BUYBACK" || requestType == "BANK" || requestType == "GBANK" ||
             requestType == "SPELLBOOK" || requestType == "BOT_SKILLS" || requestType == "BOT_REPUTATIONS" ||
             requestType == "BOT_EMBLEMS" || requestType == "OUTFITS" || requestType == "TRAINER")
         {
@@ -12922,7 +12999,9 @@ bool HandleBridgeOpcode(Player* player, ChatMsg replyType, std::string const& op
             if (!IsValidRequestToken(fields[2]))
                 return SendProtocolError(player, replyType, normalized, requestType, "", "BAD_TOKEN");
 
-            if (requestType == "INVENTORY")
+            if (requestType == "GEAR")
+                SendGearInspectPackets(player, replyType, fields[1], fields[2]);
+            else if (requestType == "INVENTORY")
                 SendInventorySnapshot(player, replyType, fields[1], fields[2]);
             else if (requestType == "INVENTORY_EXACT")
             {

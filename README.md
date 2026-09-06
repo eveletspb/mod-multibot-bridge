@@ -89,6 +89,9 @@ The lifecycle milestone merged on **30 August 2026** adds the capabilities:
 ALT_ROSTER_V1
 BOT_LIFECYCLE_V1
 BOT_TARGET_RESOLVE_V1
+GEAR_INSPECT_V1
+DETAIL_V1
+STATS_V1
 ```
 
 These services support the companion addon's My Bots, Group, Guild, Friends and Favorites rosters.
