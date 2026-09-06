@@ -979,6 +979,148 @@ uint32 BuildItemLevelScore(Player* bot)
     return score / divisor;
 }
 
+float GearScoreSlotModifier(uint32 inventoryType)
+{
+    switch (inventoryType)
+    {
+        case INVTYPE_RELIC: return 0.3164f;
+        case INVTYPE_TRINKET: return 0.5625f;
+        case INVTYPE_2HWEAPON: return 2.0f;
+        case INVTYPE_WEAPONMAINHAND:
+        case INVTYPE_WEAPONOFFHAND:
+        case INVTYPE_WEAPON:
+        case INVTYPE_HOLDABLE:
+        case INVTYPE_SHIELD: return 1.0f;
+        case INVTYPE_RANGED:
+        case INVTYPE_THROWN:
+        case INVTYPE_RANGEDRIGHT: return 0.3164f;
+        case INVTYPE_HEAD:
+        case INVTYPE_CHEST:
+        case INVTYPE_ROBE:
+        case INVTYPE_LEGS: return 1.0f;
+        case INVTYPE_SHOULDERS:
+        case INVTYPE_WAIST:
+        case INVTYPE_FEET:
+        case INVTYPE_HANDS: return 0.75f;
+        case INVTYPE_NECK:
+        case INVTYPE_WRISTS:
+        case INVTYPE_FINGER:
+        case INVTYPE_CLOAK: return 0.5625f;
+        case INVTYPE_BODY: return 0.0f;
+        default: return 0.0f;
+    }
+}
+
+uint32 GearScoreForItem(ItemTemplate const* proto)
+{
+    if (!proto)
+        return 0;
+
+    float qualityScale = 1.0f;
+    uint32 quality = proto->Quality;
+    float itemLevel = static_cast<float>(proto->ItemLevel);
+    if (quality == 5)
+    {
+        qualityScale = 1.3f;
+        quality = 4;
+    }
+    else if (quality == 1 || quality == 0)
+    {
+        qualityScale = 0.005f;
+        quality = 2;
+    }
+    else if (quality == 7)
+    {
+        quality = 3;
+        itemLevel = 187.05f;
+    }
+
+    if (quality < 2 || quality > 4)
+        return 0;
+
+    float const slotModifier = GearScoreSlotModifier(proto->InventoryType);
+    if (slotModifier <= 0.0f)
+        return 0;
+
+    float formulaA = 0.0f;
+    float formulaB = 0.0f;
+    if (itemLevel > 120.0f)
+    {
+        switch (quality)
+        {
+            case 2: formulaA = 73.0f; formulaB = 1.0f; break;
+            case 3: formulaA = 81.375f; formulaB = 0.8125f; break;
+            case 4: formulaA = 91.45f; formulaB = 0.65f; break;
+            default: return 0;
+        }
+    }
+    else
+    {
+        switch (quality)
+        {
+            case 1: formulaA = 0.0f; formulaB = 2.25f; break;
+            case 2: formulaA = 8.0f; formulaB = 2.0f; break;
+            case 3: formulaA = 0.75f; formulaB = 1.8f; break;
+            case 4: formulaA = 26.0f; formulaB = 1.2f; break;
+            default: return 0;
+        }
+    }
+
+    float const score = std::max(0.0f, ((itemLevel - formulaA) / formulaB) * slotModifier * 1.8618f * qualityScale);
+    return static_cast<uint32>(score);
+}
+
+uint32 BuildGearScore(Player* bot)
+{
+    if (!bot)
+        return 0;
+
+    float titanGripScale = 1.0f;
+    ItemTemplate const* mainHand = nullptr;
+    ItemTemplate const* offHand = nullptr;
+    if (Item* item = bot->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_MAINHAND))
+        mainHand = item->GetTemplate();
+    if (Item* item = bot->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_OFFHAND))
+        offHand = item->GetTemplate();
+    if ((mainHand && mainHand->InventoryType == INVTYPE_2HWEAPON) ||
+        (offHand && offHand->InventoryType == INVTYPE_2HWEAPON))
+        titanGripScale = 0.5f;
+
+    float total = 0.0f;
+    if (offHand)
+    {
+        float score = static_cast<float>(GearScoreForItem(offHand));
+        if (bot->getClass() == CLASS_HUNTER)
+            score *= 0.3164f;
+        total += score * titanGripScale;
+    }
+
+    for (uint8 slot = EQUIPMENT_SLOT_START; slot <= EQUIPMENT_SLOT_RANGED; ++slot)
+    {
+        if (slot == EQUIPMENT_SLOT_BODY || slot == EQUIPMENT_SLOT_OFFHAND)
+            continue;
+
+        Item* const item = bot->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
+        ItemTemplate const* const proto = item ? item->GetTemplate() : nullptr;
+        if (!proto)
+            continue;
+
+        float score = static_cast<float>(GearScoreForItem(proto));
+        if (bot->getClass() == CLASS_HUNTER)
+        {
+            if (slot == EQUIPMENT_SLOT_MAINHAND)
+                score *= 0.3164f;
+            else if (slot == EQUIPMENT_SLOT_RANGED)
+                score *= 5.3224f;
+        }
+        if (slot == EQUIPMENT_SLOT_MAINHAND)
+            score *= titanGripScale;
+        total += score;
+    }
+
+    return total > 0.0f ? static_cast<uint32>(total) : 0;
+}
+
 BotDetailData BuildBotDetail(Player* bot)
 {
     BotDetailData detail;
@@ -1038,7 +1180,7 @@ void SendGearInspectPackets(
     }
 
     std::ostringstream summary;
-    summary << prefix << kFieldSeparator << BuildItemLevelScore(bot);
+    summary << prefix << kFieldSeparator << BuildItemLevelScore(bot) << kFieldSeparator << BuildGearScore(bot);
     SendAddonPacket(requester, replyType, "GEAR_SUMMARY", summary.str());
 
     for (uint8 slot = EQUIPMENT_SLOT_START; slot < EQUIPMENT_SLOT_END; ++slot)
