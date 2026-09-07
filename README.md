@@ -74,7 +74,7 @@ The module does **not** expose an arbitrary Playerbots command executor.
 | **Enchanting** | Dedicated Enchanting Trade Service using the native Trade workflow. |
 | **Quests** | Structured quest data and bot quest abandon. |
 | **Loot** | Loot-profile control and persistent exact always-loot item rules. |
-| **Group tools** | Formation, Roll and other migrated group controls. |
+| **Group tools** | Formation, Roll, summon and other migrated group controls. |
 | **SelfBot** | Dedicated SelfBot state, strategy and selected action endpoints. |
 | **Character information** | Stats, PvP stats, skills, reputations, currencies/emblems, spellbook and related data. |
 | **Outfits** | Structured outfit listing and actions. |
@@ -141,6 +141,7 @@ The Bridge currently advertises a growing set of dedicated capabilities, includi
 ```text
 STATE_FRAMING_V1
 STRATEGY_MUTATION_V1
+SUMMON_V1
 OUTFIT_V1
 INVENTORY_V1
 INVENTORY_EXACT_V1
