@@ -32,6 +32,7 @@
 #include "EventProcessor.h"
 #include "Trigger.h"
 #include "Formations.h"
+#include "UseMeetingStoneAction.h"
 #include "ScriptedGossip.h"
 #include "ScriptMgr.h"
 #include "SharedDefines.h"
@@ -39,6 +40,7 @@
 #include "SpellMgr.h"
 #include "Trainer.h"
 #include "Unit.h"
+#include "Value.h"
 #include "World.h"
 #include "WorldPacket.h"
 #include "WorldSession.h"
@@ -51,6 +53,7 @@
 #include <chrono>
 #include <deque>
 #include <limits>
+#include <list>
 #include <map>
 #include <set>
 #include <sstream>
@@ -81,6 +84,10 @@ std::size_t constexpr kMaxStrategyNameLength = 96;
 std::size_t constexpr kMaxStrategyMatchedBots = 128;
 std::size_t constexpr kStrategyMutationRateLimit = 24;
 std::chrono::milliseconds constexpr kStrategyMutationRateWindow(2000);
+std::size_t constexpr kMaxSummonMatchedBots = 128;
+std::size_t constexpr kSummonRateLimit = 64;
+std::chrono::milliseconds constexpr kSummonRateWindow(2000);
+std::size_t constexpr kSummonMaxRequesterStates = 512;
 std::size_t constexpr kItemActionRateLimit = 24;
 std::chrono::milliseconds constexpr kItemActionRateWindow(2000);
 std::size_t constexpr kInventoryExactRateLimit = 8;
@@ -192,6 +199,7 @@ std::size_t constexpr kCraftRecipeTargetMaxRequesterStates = 512;
 std::size_t constexpr kMaxGroupRollItemLinkLength = 160;
 char const* const kStateFramingCapability = "STATE_FRAMING_V1";
 char const* const kStrategyMutationCapability = "STRATEGY_MUTATION_V1";
+char const* const kSummonCapability = "SUMMON_V1";
 char const* const kOutfitCapability = "OUTFIT_V1";
 char const* const kInventoryCapability = "INVENTORY_V1";
 char const* const kInventoryExactCapability = "INVENTORY_EXACT_V1";
@@ -319,6 +327,7 @@ bool SendCapabilitiesPackets(Player* player, ChatMsg chatType)
     {
         kStateFramingCapability,
         kStrategyMutationCapability,
+        kSummonCapability,
         kOutfitCapability,
         kInventoryCapability,
         kInventoryExactCapability,
@@ -8995,6 +9004,32 @@ bool ApplyNativeDisperseCommand(Player* bot, std::string const& command)
     return true;
 }
 
+bool TryParseWaitForAttackTime(std::string const& command, uint8& waitTime)
+{
+    static std::string const waitPrefix = "WAIT FOR ATTACK TIME ";
+    std::string const normalized = ToUpper(Trim(command));
+    if (normalized.rfind(waitPrefix, 0) != 0)
+        return false;
+
+    std::string const value = Trim(normalized.substr(waitPrefix.size()));
+    if (value.empty())
+        return false;
+
+    uint32 seconds = 0;
+    for (char const c : value)
+    {
+        if (!std::isdigit(static_cast<unsigned char>(c)))
+            return false;
+
+        seconds = (seconds * 10) + static_cast<uint32>(c - '0');
+        if (seconds > 60)
+            return false;
+    }
+
+    waitTime = static_cast<uint8>(seconds);
+    return true;
+}
+
 bool IsAllowedCombatCommand(std::string const& command)
 {
     std::string const normalized = ToUpper(Trim(command));
@@ -9026,26 +9061,8 @@ bool IsAllowedCombatCommand(std::string const& command)
     if (allowed.find(normalized) != allowed.end())
         return true;
 
-    static std::string const waitPrefix = "WAIT FOR ATTACK TIME ";
-    if (normalized.rfind(waitPrefix, 0) != 0)
-        return false;
-
-    std::string const value = Trim(normalized.substr(waitPrefix.size()));
-    if (value.empty())
-        return false;
-
-    uint32 seconds = 0;
-    for (char c : value)
-    {
-        if (!std::isdigit(static_cast<unsigned char>(c)))
-            return false;
-
-        seconds = (seconds * 10) + static_cast<uint32>(c - '0');
-        if (seconds > 60)
-            return false;
-    }
-
-    return true;
+    uint8 waitTime = 0;
+    return TryParseWaitForAttackTime(command, waitTime);
 }
 
 std::string NormalizeCombatCommand(std::string const& command)
@@ -9644,6 +9661,70 @@ bool ApplyNativeStrategyMutation(
 
     return true;
 }
+
+bool ApplyNativeWaitForAttackTime(Player* requester, Player* bot, uint8 waitTime)
+{
+    if (!requester || !bot)
+        return false;
+
+    PlayerbotAI* const botAI = GetBotAI(bot);
+    if (!botAI || !botAI->GetSecurity() ||
+        !botAI->GetSecurity()->CheckLevelFor(PLAYERBOT_SECURITY_ALLOW_ALL, true, requester))
+    {
+        return false;
+    }
+
+    AiObjectContext* const context = botAI->GetAiObjectContext();
+    if (!context)
+        return false;
+
+    auto* const waitTimeValue = context->GetValue<uint8>("wait for attack time");
+    if (!waitTimeValue)
+        return false;
+
+    bool const wasEnabled = botAI->HasStrategy("wait for attack", BOT_STATE_COMBAT);
+    bool const shouldEnable = waitTime > 0;
+    uint8 const previousWaitTime = waitTimeValue->Get();
+    bool const strategyChanged = wasEnabled != shouldEnable;
+
+    if (strategyChanged)
+    {
+        std::vector<StrategyMutationOperation> const operations =
+        {
+            {shouldEnable, "wait for attack"}
+        };
+        std::string const changes = shouldEnable ? "+wait for attack" : "-wait for attack";
+        if (!ApplyNativeStrategyMutation(requester, bot, "co", BOT_STATE_COMBAT, changes, operations))
+            return false;
+    }
+
+    waitTimeValue->Set(waitTime);
+    if (waitTimeValue->Get() == waitTime &&
+        botAI->HasStrategy("wait for attack", BOT_STATE_COMBAT) == shouldEnable)
+    {
+        return true;
+    }
+
+    waitTimeValue->Set(previousWaitTime);
+    if (strategyChanged)
+    {
+        std::vector<StrategyMutationOperation> const rollbackOperations =
+        {
+            {wasEnabled, "wait for attack"}
+        };
+        std::string const rollbackChanges = wasEnabled ? "+wait for attack" : "-wait for attack";
+        ApplyNativeStrategyMutation(
+            requester,
+            bot,
+            "co",
+            BOT_STATE_COMBAT,
+            rollbackChanges,
+            rollbackOperations);
+    }
+
+    return false;
+}
+
 void SendStrategyMutationAck(
     Player* requester,
     ChatMsg replyType,
@@ -10880,6 +10961,8 @@ void RunCombatCommand(Player* requester, ChatMsg replyType, std::string const& s
     std::string const rawCommand = Trim(UrlDecodeField(encodedCommand));
     std::string const command = NormalizeCombatCommand(rawCommand);
     uint32 executed = 0;
+    uint8 waitTime = 0;
+    bool const setsWaitTime = TryParseWaitForAttackTime(command, waitTime);
 
     if (IsAllowedCombatCommand(command) && (scope == "ALL" || scope == "RAID" || scope == "GROUP" || scope == "PARTY" || scope == "BOT"))
     {
@@ -10888,7 +10971,8 @@ void RunCombatCommand(Player* requester, ChatMsg replyType, std::string const& s
             if (!BotMatchesCombatScope(requester, bot, scope, target))
                 continue;
 
-            if (ExecuteSilentBotCommand(requester, bot, command))
+            if ((setsWaitTime && ApplyNativeWaitForAttackTime(requester, bot, waitTime)) ||
+                (!setsWaitTime && ExecuteSilentBotCommand(requester, bot, command)))
                 ++executed;
         }
     }
@@ -10901,6 +10985,158 @@ void RunCombatCommand(Player* requester, ChatMsg replyType, std::string const& s
         << kFieldSeparator << UrlEncodeField(command);
 
     SendAddonPacket(requester, replyType, "COMBAT_ACK", payload.str());
+}
+
+bool ApplyNativeSummon(Player* requester, Player* bot)
+{
+    if (!requester || !bot)
+        return false;
+
+    PlayerbotAI* const botAI = GetBotAI(bot);
+    if (!botAI || !botAI->GetSecurity() ||
+        !botAI->GetSecurity()->CheckLevelFor(PLAYERBOT_SECURITY_ALLOW_ALL, true, requester))
+    {
+        return false;
+    }
+
+    if (bot->GetPet())
+        botAI->PetFollow();
+
+    AiObjectContext* const context = botAI->GetAiObjectContext();
+    if (!context)
+        return false;
+
+    context->GetValue<std::list<FleeInfo>&>("recently flee info")->Get().clear();
+    SummonAction action(botAI);
+    return action.Teleport(requester, bot, true);
+}
+
+struct SummonRateState
+{
+    std::deque<std::chrono::steady_clock::time_point> requests;
+};
+
+std::map<ObjectGuid, SummonRateState> sSummonRateStates;
+
+bool ConsumeSummonRateLimit(Player* requester)
+{
+    if (!requester)
+        return false;
+
+    std::chrono::steady_clock::time_point const now = std::chrono::steady_clock::now();
+    ObjectGuid const requesterKey = requester->GetGUID();
+
+    if (sSummonRateStates.size() >= kSummonMaxRequesterStates &&
+        sSummonRateStates.find(requesterKey) == sSummonRateStates.end())
+    {
+        for (auto it = sSummonRateStates.begin(); it != sSummonRateStates.end();)
+        {
+            while (!it->second.requests.empty() && now - it->second.requests.front() >= kSummonRateWindow)
+                it->second.requests.pop_front();
+
+            if (it->second.requests.empty())
+                it = sSummonRateStates.erase(it);
+            else
+                ++it;
+        }
+
+        if (sSummonRateStates.size() >= kSummonMaxRequesterStates)
+            return false;
+    }
+
+    SummonRateState& state = sSummonRateStates[requesterKey];
+
+    while (!state.requests.empty() && now - state.requests.front() >= kSummonRateWindow)
+        state.requests.pop_front();
+
+    if (state.requests.size() >= kSummonRateLimit)
+        return false;
+
+    state.requests.push_back(now);
+
+    return true;
+}
+
+void SendSummonAck(
+    Player* requester,
+    ChatMsg replyType,
+    std::string const& scope,
+    std::string const& target,
+    std::string const& token,
+    uint32 matched,
+    uint32 succeeded,
+    uint32 failed,
+    std::string const& reason)
+{
+    std::ostringstream payload;
+    payload << scope
+        << kFieldSeparator << UrlEncodeField(target)
+        << kFieldSeparator << token
+        << kFieldSeparator << matched
+        << kFieldSeparator << succeeded
+        << kFieldSeparator << failed
+        << kFieldSeparator << UrlEncodeField(reason);
+
+    SendStateAddonPacket(requester, replyType, "SUMMON_ACK", payload.str());
+}
+
+void RunSummonCommand(
+    Player* requester,
+    ChatMsg replyType,
+    std::string const& scopeValue,
+    std::string const& encodedTarget,
+    std::string const& requestToken)
+{
+    std::string const scope = ToUpper(Trim(scopeValue));
+    std::string target;
+    std::string const token = Trim(requestToken);
+    uint32 matched = 0;
+    uint32 succeeded = 0;
+    uint32 failed = 0;
+    bool botLimitExceeded = false;
+    std::string reason = "OK";
+
+    if (!TryUrlDecodeField(encodedTarget, target, kMaxBotNameLength, true))
+    {
+        SendSummonAck(requester, replyType, scope, "", token, 0, 0, 0, "BAD_ENCODING");
+        return;
+    }
+
+    target = Trim(target);
+    if (!ConsumeSummonRateLimit(requester))
+    {
+        SendSummonAck(requester, replyType, scope, target, token, 0, 0, 0, "RATE_LIMIT");
+        return;
+    }
+
+    for (Player* const bot : GetBridgeVisibleBots(requester))
+    {
+        if (!BotMatchesCombatScope(requester, bot, scope, target))
+            continue;
+
+        if (matched >= kMaxSummonMatchedBots)
+        {
+            botLimitExceeded = true;
+            continue;
+        }
+
+        ++matched;
+        if (ApplyNativeSummon(requester, bot))
+            ++succeeded;
+        else
+            ++failed;
+    }
+
+    if (matched == 0)
+        reason = "NO_MATCH";
+    else if (botLimitExceeded)
+        reason = "BOT_LIMIT";
+    else if (failed > 0 && succeeded > 0)
+        reason = "PARTIAL";
+    else if (failed > 0)
+        reason = "FAILED";
+
+    SendSummonAck(requester, replyType, scope, target, token, matched, succeeded, failed, reason);
 }
 
 void RunPositionCommand(Player* requester, ChatMsg replyType, std::string const& scopeValue, std::string const& encodedTarget, std::string const& requestToken, std::string const& encodedCommand)
@@ -13997,6 +14233,34 @@ bool HandleBridgeOpcode(Player* player, ChatMsg replyType, std::string const& op
             return SendProtocolError(player, replyType, normalized, requestType, token, "BAD_ENCODING");
 
         RunStrategyMutationCommand(player, replyType, fields[1], fields[2], fields[3], fields[4], fields[5]);
+        return true;
+    }
+
+    if (requestType == "SUMMON")
+    {
+        std::string const token = GetSafeErrorToken(fields, 3);
+        if (fields.size() != 4)
+            return SendProtocolError(player, replyType, normalized, requestType, token, "BAD_FIELD_COUNT");
+
+        std::string const scope = ToUpper(fields[1]);
+        if ((scope != "GROUP" && scope != "BOT") || fields[1] != scope)
+            return SendProtocolError(player, replyType, normalized, requestType, token, "BAD_SCOPE");
+
+        if (!IsValidEncodedField(fields[2], kMaxBotNameLength, true))
+            return SendProtocolError(player, replyType, normalized, requestType, token, "BAD_ENCODING");
+
+        std::string decodedTarget;
+        if (!TryUrlDecodeField(fields[2], decodedTarget, kMaxBotNameLength, true) ||
+            (scope == "BOT" && Trim(decodedTarget).empty()) ||
+            (scope != "BOT" && !Trim(decodedTarget).empty()))
+        {
+            return SendProtocolError(player, replyType, normalized, requestType, token, "BAD_TARGET");
+        }
+
+        if (!IsValidRequestToken(fields[3]))
+            return SendProtocolError(player, replyType, normalized, requestType, "", "BAD_TOKEN");
+
+        RunSummonCommand(player, replyType, fields[1], fields[2], fields[3]);
         return true;
     }
 
