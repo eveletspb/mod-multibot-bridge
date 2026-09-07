@@ -79,7 +79,7 @@ The module does **not** expose an arbitrary Playerbots command executor.
 | **Autogear** | `AUTOGEAR_OPTIONS_V1` provides server limits and a validated INFO/PLAN/APPLY workflow for quality/iLvl-based equipment generation. |
 | **Hunter Pet** | `HUNTER_PET_CONTROL_V1`, `HUNTER_PET_MANAGE_V1` and `HUNTER_PET_LIFECYCLE_V1` provide bounded pet control, tame/rename/abandon and temporary dismiss/call lifecycle handling. |
 | **Loot** | Loot-profile control and persistent exact always-loot item rules. |
-| **Group tools** | Formation, Roll and other migrated controls, plus dedicated `FOLLOW_ORDER_V1`, `STAY_ORDER_V1`, `ATTACK_ORDER_V1`, `FLEE_ORDER_V1`, bounded `GROUP_ACTION_V1` and `RTSC_ORDER_V1` endpoints. |
+| **Group tools** | Formation, Roll, summon and other migrated controls, plus dedicated `FOLLOW_ORDER_V1`, `STAY_ORDER_V1`, `ATTACK_ORDER_V1`, `FLEE_ORDER_V1`, bounded `GROUP_ACTION_V1` and `RTSC_ORDER_V1` endpoints. |
 | **SelfBot** | Dedicated SelfBot state, strategy and selected action endpoints. |
 | **Character information** | Stats, PvP stats, skills, reputations, currencies/emblems, spellbook snapshots plus specialized cast/ignored-spell endpoints, and related data. |
 | **Outfits** | Structured outfit listing and actions. |
@@ -417,6 +417,7 @@ The Bridge currently advertises a growing set of dedicated capabilities, includi
 STATE_FRAMING_V1
 STRATEGY_MUTATION_V1
 WARLOCK_STONE_STATE_V1
+SUMMON_V1
 OUTFIT_V1
 INVENTORY_V1
 INVENTORY_EXACT_V1
