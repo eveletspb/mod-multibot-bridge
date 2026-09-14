@@ -419,6 +419,7 @@ STATE_FRAMING_V1
 STRATEGY_MUTATION_V1
 WARLOCK_STONE_STATE_V1
 SUMMON_V1
+GROUP_ORDER_V1
 OUTFIT_V1
 INVENTORY_V1
 INVENTORY_EXACT_V1
@@ -541,6 +542,8 @@ Creator `addclass` is migrated through the specialized `CREATOR_ADDCLASS_V1` end
 The bounded Group Actions set `drink`, `release`, `revive` and `summon` is migrated through `GROUP_ACTION_V1`. RTSC is migrated and runtime validated through `RTSC_ORDER_V1`, while AEDM intentionally remains on the native WoW/Playerbots spell path. The five structured Quest interaction capabilities are present, `AUTOGEAR_OPTIONS_V1` provides the validated server-authoritative INFO/PLAN/APPLY workflow, Maintenance M1/M2 is completed through `BOT_MAINTENANCE_V1`, Hunter Pet H1/H2/H3 is runtime validated through `HUNTER_PET_CONTROL_V1`, `HUNTER_PET_MANAGE_V1` and `HUNTER_PET_LIFECYCLE_V1`, and Spellbook Cast / Ignore is runtime validated through `SPELLBOOK_CAST_V1` and `SPELLBOOK_IGNORE_V1`. Trainer lifecycle, Outfit lifecycle, Rogue strategy-name compatibility, Formation F1–F6 and normal Craft C1 hardening are closed. Warlock Firestone/Spellstone is finalized through `WARLOCK_STONE_STATE_V1`, including authoritative physical state, specialized silent item application and known-enchant-only OFF. The remaining active work is the explicitly deferred technical residuals followed by final global legacy parser/fallback and chat-path cleanup.
 
 The project remains intentionally **bridge-first / mostly chatless** while the remaining chat families are audited and migrated independently.
+
+The fork also retains `GROUP_ORDER_V1` for the companion addon's aggregate Follow / Stay / Flee / tank Attack workflow. This protocol remains available alongside the dedicated upstream order endpoints.
 
 Deferred work is tracked in the addon roadmap:
 
