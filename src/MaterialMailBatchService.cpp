@@ -75,8 +75,9 @@ bool IsMaterial(ItemTemplate const* itemTemplate)
     if (itemTemplate->FoodType == PET_DIET_RAW_FISH)
         return true;
 
+    // Keep class reagents such as Ankhs, candles, symbols and spell powders on the bot.
     if (itemTemplate->Class == ITEM_CLASS_REAGENT)
-        return true;
+        return false;
 
     if (itemTemplate->Class != ITEM_CLASS_TRADE_GOODS)
         return false;
