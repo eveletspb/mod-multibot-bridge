@@ -75,6 +75,7 @@ The module does **not** expose an arbitrary Playerbots command executor.
 | **Quests** | Structured quest data and bot quest abandon. |
 | **Loot** | Loot-profile control and persistent exact always-loot item rules. |
 | **Group tools** | Formation, Roll, summon and other migrated group controls. |
+| **Material mail** | One confirmed group/raid batch sends supported material stacks from eligible online bots to the current character, with server-side mailbox, postage and capacity checks. |
 | **SelfBot** | Dedicated SelfBot state, strategy and selected action endpoints. |
 | **Character information** | Stats, PvP stats, skills, reputations, currencies/emblems, spellbook and related data. |
 | **Outfits** | Structured outfit listing and actions. |
@@ -162,6 +163,7 @@ TALENT_APPLY_V1
 TALENT_SPEC_APPLY_V1
 CRAFT_RECIPE_TARGET_V1
 GROUP_ROLL_V1
+GROUP_MATERIAL_MAIL_V1
 ENCHANT_TRADE_V1
 SELF_BOT_V1
 SELF_STRATEGY_V1
@@ -172,6 +174,12 @@ BOT_TARGET_RESOLVE_V1
 ```
 
 The exact packet schemas are implementation details shared with the addon and may evolve with negotiated capability versions.
+
+`GROUP_MATERIAL_MAIL_V1` uses the normal AzerothCore mail rules and the existing
+`AiPlayerbot.BotSendMailEnabled` setting. A batch is limited to 40 letters and
+480 attachments, packs up to 12 physical stacks into each letter, and has a
+five-second requester cooldown. Random and AddClass bots are never allowed to
+send through this endpoint.
 
 ---
 

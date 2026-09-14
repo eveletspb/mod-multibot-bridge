@@ -14,6 +14,7 @@
 #include "ItemPackets.h"
 #include "ItemUsageValue.h"
 #include "LootObjectStack.h"
+#include "MaterialMailBatchService.h"
 #include "ObjectAccessor.h"
 #include "ObjectGuid.h"
 #include "ObjectMgr.h"
@@ -88,6 +89,10 @@ std::size_t constexpr kMaxSummonMatchedBots = 128;
 std::size_t constexpr kSummonRateLimit = 64;
 std::chrono::milliseconds constexpr kSummonRateWindow(2000);
 std::size_t constexpr kSummonMaxRequesterStates = 512;
+std::chrono::seconds constexpr kMaterialMailCooldown(5);
+std::chrono::seconds constexpr kMaterialMailReplayTtl(30);
+std::size_t constexpr kMaterialMailMaxRecentTokens = 16;
+std::size_t constexpr kMaterialMailMaxRequesterStates = 512;
 std::size_t constexpr kItemActionRateLimit = 24;
 std::chrono::milliseconds constexpr kItemActionRateWindow(2000);
 std::size_t constexpr kInventoryExactRateLimit = 8;
@@ -200,6 +205,7 @@ std::size_t constexpr kMaxGroupRollItemLinkLength = 160;
 char const* const kStateFramingCapability = "STATE_FRAMING_V1";
 char const* const kStrategyMutationCapability = "STRATEGY_MUTATION_V1";
 char const* const kSummonCapability = "SUMMON_V1";
+char const* const kMaterialMailCapability = "GROUP_MATERIAL_MAIL_V1";
 char const* const kOutfitCapability = "OUTFIT_V1";
 char const* const kInventoryCapability = "INVENTORY_V1";
 char const* const kInventoryExactCapability = "INVENTORY_EXACT_V1";
@@ -328,6 +334,7 @@ bool SendCapabilitiesPackets(Player* player, ChatMsg chatType)
         kStateFramingCapability,
         kStrategyMutationCapability,
         kSummonCapability,
+        kMaterialMailCapability,
         kOutfitCapability,
         kInventoryCapability,
         kInventoryExactCapability,
@@ -11503,6 +11510,194 @@ std::vector<Player*> GetBridgeVisibleBots(Player* player)
     return bots;
 }
 
+enum class MaterialMailAdmission
+{
+    Accepted,
+    Duplicate,
+    Busy,
+    Cooldown,
+    TooManyRequesters
+};
+
+struct MaterialMailRequestState
+{
+    bool active = false;
+    bool hasLastAccepted = false;
+    std::chrono::steady_clock::time_point lastAccepted;
+    std::deque<std::pair<std::string, std::chrono::steady_clock::time_point>> recentTokens;
+};
+
+std::map<uint32, MaterialMailRequestState> sMaterialMailRequestStates;
+
+void PruneMaterialMailState(MaterialMailRequestState& state, std::chrono::steady_clock::time_point now)
+{
+    while (!state.recentTokens.empty() && now - state.recentTokens.front().second >= kMaterialMailReplayTtl)
+        state.recentTokens.pop_front();
+
+    while (state.recentTokens.size() > kMaterialMailMaxRecentTokens)
+        state.recentTokens.pop_front();
+}
+
+MaterialMailAdmission BeginMaterialMailRequest(Player* requester, std::string const& token)
+{
+    if (!requester)
+        return MaterialMailAdmission::TooManyRequesters;
+
+    std::chrono::steady_clock::time_point const now = std::chrono::steady_clock::now();
+    uint32 const requesterKey = requester->GetGUID().GetCounter();
+    auto stateIt = sMaterialMailRequestStates.find(requesterKey);
+    if (stateIt == sMaterialMailRequestStates.end())
+    {
+        if (sMaterialMailRequestStates.size() >= kMaterialMailMaxRequesterStates)
+        {
+            for (auto it = sMaterialMailRequestStates.begin(); it != sMaterialMailRequestStates.end();)
+            {
+                PruneMaterialMailState(it->second, now);
+                bool const cooldownExpired = !it->second.hasLastAccepted || now - it->second.lastAccepted >= kMaterialMailCooldown;
+                if (!it->second.active && it->second.recentTokens.empty() && cooldownExpired)
+                    it = sMaterialMailRequestStates.erase(it);
+                else
+                    ++it;
+            }
+        }
+
+        if (sMaterialMailRequestStates.size() >= kMaterialMailMaxRequesterStates)
+            return MaterialMailAdmission::TooManyRequesters;
+
+        stateIt = sMaterialMailRequestStates.emplace(requesterKey, MaterialMailRequestState()).first;
+    }
+
+    MaterialMailRequestState& state = stateIt->second;
+    PruneMaterialMailState(state, now);
+    for (auto const& recent : state.recentTokens)
+        if (recent.first == token)
+            return MaterialMailAdmission::Duplicate;
+
+    if (state.active)
+        return MaterialMailAdmission::Busy;
+
+    if (state.hasLastAccepted && now - state.lastAccepted < kMaterialMailCooldown)
+        return MaterialMailAdmission::Cooldown;
+
+    state.active = true;
+    state.hasLastAccepted = true;
+    state.lastAccepted = now;
+    state.recentTokens.push_back({token, now});
+    PruneMaterialMailState(state, now);
+    return MaterialMailAdmission::Accepted;
+}
+
+void FinishMaterialMailRequest(Player* requester)
+{
+    if (!requester)
+        return;
+
+    auto const stateIt = sMaterialMailRequestStates.find(requester->GetGUID().GetCounter());
+    if (stateIt != sMaterialMailRequestStates.end())
+        stateIt->second.active = false;
+}
+
+void ClearMaterialMailRequestState(Player* requester)
+{
+    if (requester)
+        sMaterialMailRequestStates.erase(requester->GetGUID().GetCounter());
+}
+
+void SendMaterialMailResult(
+    Player* requester,
+    ChatMsg replyType,
+    std::string const& token,
+    MultiBotBridge::MaterialMailBatchResult const& result)
+{
+    std::ostringstream beginPayload;
+    beginPayload << token << kFieldSeparator << result.scope << kFieldSeparator << result.matchedBots;
+    SendAddonPacket(requester, replyType, "MATERIAL_MAIL_BEGIN", beginPayload.str());
+
+    for (MultiBotBridge::MaterialMailSkippedBot const& skipped : result.skipped)
+    {
+        std::ostringstream skipPayload;
+        skipPayload << token
+            << kFieldSeparator << UrlEncodeField(skipped.name)
+            << kFieldSeparator << skipped.reason;
+        SendAddonPacket(requester, replyType, "MATERIAL_MAIL_SKIP", skipPayload.str());
+    }
+
+    std::ostringstream endPayload;
+    endPayload << token
+        << kFieldSeparator << result.status
+        << kFieldSeparator << result.sentBots
+        << kFieldSeparator << result.skippedBots
+        << kFieldSeparator << result.truncatedBots
+        << kFieldSeparator << result.sentStacks
+        << kFieldSeparator << result.remainingStacks
+        << kFieldSeparator << result.sentItems
+        << kFieldSeparator << result.sentMails
+        << kFieldSeparator << result.reason;
+    SendAddonPacket(requester, replyType, "MATERIAL_MAIL_END", endPayload.str());
+}
+
+void RunMaterialMailCommand(Player* requester, ChatMsg replyType, std::string const& token)
+{
+    MultiBotBridge::MaterialMailBatchResult result;
+    MaterialMailAdmission const admission = BeginMaterialMailRequest(requester, token);
+    if (admission != MaterialMailAdmission::Accepted)
+    {
+        if (requester && requester->GetGroup())
+            result.scope = requester->GetGroup()->isRaidGroup() ? "RAID" : "PARTY";
+
+        switch (admission)
+        {
+            case MaterialMailAdmission::Duplicate:
+                result.reason = "DUPLICATE";
+                break;
+            case MaterialMailAdmission::Busy:
+                result.reason = "BUSY";
+                break;
+            case MaterialMailAdmission::Cooldown:
+                result.reason = "RATE_LIMIT";
+                break;
+            default:
+                result.reason = "RATE_LIMIT";
+                break;
+        }
+
+        SendMaterialMailResult(requester, replyType, token, result);
+        return;
+    }
+
+    std::chrono::steady_clock::time_point const startedAt = std::chrono::steady_clock::now();
+    result = MultiBotBridge::ExecuteMaterialMailBatch(requester, GetBridgeVisibleBots(requester));
+    FinishMaterialMailRequest(requester);
+    SendMaterialMailResult(requester, replyType, token, result);
+
+    std::ostringstream skippedLog;
+    for (std::size_t index = 0; index < result.skipped.size(); ++index)
+    {
+        if (index)
+            skippedLog << ',';
+        skippedLog << result.skipped[index].reason << ':' << result.skipped[index].name;
+    }
+
+    auto const duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - startedAt).count();
+    LOG_INFO(
+        "playerbots",
+        "MaterialMailBatch token={} requester={} scope={} matched={} sentBots={} skippedBots={} truncatedBots={} attachments={} mails={} durationMs={} status={} reason={} skipped={}",
+        token,
+        requester ? requester->GetName() : "Unknown",
+        result.scope,
+        result.matchedBots,
+        result.sentBots,
+        result.skippedBots,
+        result.truncatedBots,
+        result.sentStacks,
+        result.sentMails,
+        duration,
+        result.status,
+        result.reason,
+        skippedLog.str());
+}
+
 Player* FindBotByName(Player* player, std::string const& botName)
 {
     std::string const wantedName = Trim(botName);
@@ -13479,6 +13674,22 @@ bool HandleBridgeOpcode(Player* player, ChatMsg replyType, std::string const& op
         return SendProtocolError(player, replyType, normalized, requestType, "", "UNKNOWN_GET");
     }
 
+    if (requestType == "GROUP_MATERIAL_MAIL")
+    {
+        std::string const token = GetSafeErrorToken(fields, 1);
+        if (fields.size() != 3)
+            return SendProtocolError(player, replyType, normalized, requestType, token, "BAD_FIELD_COUNT");
+
+        if (!IsValidRequestToken(fields[1]))
+            return SendProtocolError(player, replyType, normalized, requestType, "", "BAD_TOKEN");
+
+        if (fields[2] != "MATERIALS_V1")
+            return SendProtocolError(player, replyType, normalized, requestType, token, "BAD_PRESET");
+
+        RunMaterialMailCommand(player, replyType, fields[1]);
+        return true;
+    }
+
     if (requestType == "BOT_CONNECT" || requestType == "BOT_DISCONNECT")
     {
         std::string const token = GetSafeErrorToken(fields, 2);
@@ -14359,6 +14570,7 @@ public:
 
     void OnPlayerBeforeLogout(Player* player) override
     {
+        ClearMaterialMailRequestState(player);
         CancelPendingWarlockStoneSwitch(player, "STONE_LOGOUT", false);
     }
 
