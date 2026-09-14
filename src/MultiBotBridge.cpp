@@ -30,6 +30,7 @@
 #include "RandomPlayerbotMgr.h"
 #include "ReputationMgr.h"
 #include "AiObjectContext.h"
+#include "AttackAction.h"
 #include "Event.h"
 #include "EventProcessor.h"
 #include "Trigger.h"
@@ -11161,7 +11162,11 @@ bool TryNormalizeGroupOrder(
     command = ToLower(Trim(value));
     selector.clear();
 
-    if (command != "stay" && command != "follow" && command != "flee")
+    if (command == "@tank do attack my target")
+    {
+        selector = "@tank";
+    }
+    else if (command != "stay" && command != "follow" && command != "flee")
     {
         std::istringstream input(command);
         std::string action;
@@ -11196,9 +11201,9 @@ bool BotMatchesGroupOrderSelector(Player* bot, std::string const& selector)
     return false;
 }
 
-bool VerifyGroupOrderState(PlayerbotAI* botAI, std::string const& command)
+bool VerifyGroupOrderState(Player* requester, Player* bot, PlayerbotAI* botAI, std::string const& command)
 {
-    if (!botAI)
+    if (!requester || !bot || !botAI)
         return false;
 
     if (command == "stay")
@@ -11214,6 +11219,14 @@ bool VerifyGroupOrderState(PlayerbotAI* botAI, std::string const& command)
         return botAI->HasStrategy("follow", BOT_STATE_NON_COMBAT) &&
             !botAI->HasStrategy("stay", BOT_STATE_NON_COMBAT) &&
             !botAI->HasStrategy("stay", BOT_STATE_COMBAT);
+    }
+
+    if (command == "@tank do attack my target")
+    {
+        ObjectGuid const target = requester->GetTarget();
+        return target && bot->GetTarget() == target &&
+            !botAI->HasStrategy("passive", BOT_STATE_NON_COMBAT) &&
+            !botAI->HasStrategy("passive", BOT_STATE_COMBAT);
     }
 
     return botAI->HasStrategy("follow", BOT_STATE_NON_COMBAT) &&
@@ -11256,6 +11269,21 @@ bool ApplyNativeGroupOrder(Player* requester, Player* bot, std::string const& co
         returnPosition.Reset();
         stayPosition.Reset();
     }
+    else if (command == "@tank do attack my target")
+    {
+        if (botAI->GetMaster() != requester)
+            return false;
+
+        botAI->Reset();
+        botAI->ChangeStrategy("-passive", BOT_STATE_NON_COMBAT);
+        botAI->ChangeStrategy("-passive", BOT_STATE_COMBAT);
+        returnPosition.Reset();
+        stayPosition.Reset();
+
+        AttackMyTargetAction attack(botAI);
+        if (!attack.Execute(Event()))
+            return false;
+    }
     else
     {
         botAI->Reset();
@@ -11265,7 +11293,7 @@ bool ApplyNativeGroupOrder(Player* requester, Player* bot, std::string const& co
         stayPosition.Reset();
     }
 
-    return VerifyGroupOrderState(botAI, command);
+    return VerifyGroupOrderState(requester, bot, botAI, command);
 }
 
 struct GroupOrderRateState
@@ -11366,6 +11394,12 @@ void RunGroupOrderCommand(
     }
 
     target = Trim(target);
+    if (command == "@tank do attack my target" && !requester->GetTarget())
+    {
+        SendGroupOrderAck(requester, replyType, scope, target, token, command, 0, 0, 0, "NO_TARGET");
+        return;
+    }
+
     if (!ConsumeGroupOrderRateLimit(requester))
     {
         SendGroupOrderAck(requester, replyType, scope, target, token, command, 0, 0, 0, "RATE_LIMIT");

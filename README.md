@@ -220,12 +220,13 @@ The Bridge is the primary adaptation layer for the MultiBot Chatless project and
 
 The project is intentionally described as **bridge-first / mostly chatless** until all remaining automatic legacy chat paths have been audited and either migrated, intentionally retained or removed.
 
-Collective movement orders now use `GROUP_ORDER_V1` for the audited Playerbots commands:
+Structured group orders now use `GROUP_ORDER_V1` for the audited Playerbots commands:
 
 ```text
 follow
 stay
 flee
+@tank do attack my target
 ```
 
 The endpoint returns one aggregate acknowledgement and verifies the resulting Playerbots strategy state without emitting per-bot chat replies.
