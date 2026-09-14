@@ -26,6 +26,7 @@
 #include "PlayerbotMgr.h"
 #include "PlayerbotRepository.h"
 #include "Playerbots.h"
+#include "PositionValue.h"
 #include "RandomPlayerbotMgr.h"
 #include "ReputationMgr.h"
 #include "AiObjectContext.h"
@@ -89,6 +90,10 @@ std::size_t constexpr kMaxSummonMatchedBots = 128;
 std::size_t constexpr kSummonRateLimit = 64;
 std::chrono::milliseconds constexpr kSummonRateWindow(2000);
 std::size_t constexpr kSummonMaxRequesterStates = 512;
+std::size_t constexpr kMaxGroupOrderMatchedBots = 128;
+std::size_t constexpr kGroupOrderRateLimit = 16;
+std::chrono::milliseconds constexpr kGroupOrderRateWindow(2000);
+std::size_t constexpr kGroupOrderMaxRequesterStates = 512;
 std::chrono::seconds constexpr kMaterialMailCooldown(5);
 std::chrono::seconds constexpr kMaterialMailReplayTtl(30);
 std::size_t constexpr kMaterialMailMaxRecentTokens = 16;
@@ -205,6 +210,7 @@ std::size_t constexpr kMaxGroupRollItemLinkLength = 160;
 char const* const kStateFramingCapability = "STATE_FRAMING_V1";
 char const* const kStrategyMutationCapability = "STRATEGY_MUTATION_V1";
 char const* const kSummonCapability = "SUMMON_V1";
+char const* const kGroupOrderCapability = "GROUP_ORDER_V1";
 char const* const kMaterialMailCapability = "GROUP_MATERIAL_MAIL_V1";
 char const* const kOutfitCapability = "OUTFIT_V1";
 char const* const kInventoryCapability = "INVENTORY_V1";
@@ -334,6 +340,7 @@ bool SendCapabilitiesPackets(Player* player, ChatMsg chatType)
         kStateFramingCapability,
         kStrategyMutationCapability,
         kSummonCapability,
+        kGroupOrderCapability,
         kMaterialMailCapability,
         kOutfitCapability,
         kInventoryCapability,
@@ -11146,6 +11153,258 @@ void RunSummonCommand(
     SendSummonAck(requester, replyType, scope, target, token, matched, succeeded, failed, reason);
 }
 
+bool TryNormalizeGroupOrder(
+    std::string const& value,
+    std::string& command,
+    std::string& selector)
+{
+    command = ToLower(Trim(value));
+    selector.clear();
+
+    if (command != "stay" && command != "follow" && command != "flee")
+    {
+        std::istringstream input(command);
+        std::string action;
+        std::string trailing;
+        if (!(input >> selector >> action) || input >> trailing || action != "flee" ||
+            (selector != "@ranged" && selector != "@melee" && selector != "@healer" &&
+             selector != "@dps" && selector != "@tank"))
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool BotMatchesGroupOrderSelector(Player* bot, std::string const& selector)
+{
+    if (!bot || selector.empty())
+        return bot != nullptr;
+
+    if (selector == "@ranged")
+        return PlayerbotAI::IsRanged(bot);
+    if (selector == "@melee")
+        return PlayerbotAI::IsMelee(bot);
+    if (selector == "@healer")
+        return PlayerbotAI::IsHeal(bot);
+    if (selector == "@dps")
+        return PlayerbotAI::IsDps(bot);
+    if (selector == "@tank")
+        return PlayerbotAI::IsTank(bot);
+
+    return false;
+}
+
+bool VerifyGroupOrderState(PlayerbotAI* botAI, std::string const& command)
+{
+    if (!botAI)
+        return false;
+
+    if (command == "stay")
+    {
+        return botAI->HasStrategy("stay", BOT_STATE_NON_COMBAT) &&
+            botAI->HasStrategy("stay", BOT_STATE_COMBAT) &&
+            !botAI->HasStrategy("passive", BOT_STATE_NON_COMBAT) &&
+            !botAI->HasStrategy("passive", BOT_STATE_COMBAT);
+    }
+
+    if (command == "follow")
+    {
+        return botAI->HasStrategy("follow", BOT_STATE_NON_COMBAT) &&
+            !botAI->HasStrategy("stay", BOT_STATE_NON_COMBAT) &&
+            !botAI->HasStrategy("stay", BOT_STATE_COMBAT);
+    }
+
+    return botAI->HasStrategy("follow", BOT_STATE_NON_COMBAT) &&
+        botAI->HasStrategy("follow", BOT_STATE_COMBAT) &&
+        botAI->HasStrategy("passive", BOT_STATE_NON_COMBAT) &&
+        botAI->HasStrategy("passive", BOT_STATE_COMBAT) &&
+        !botAI->HasStrategy("stay", BOT_STATE_NON_COMBAT) &&
+        !botAI->HasStrategy("stay", BOT_STATE_COMBAT);
+}
+
+bool ApplyNativeGroupOrder(Player* requester, Player* bot, std::string const& command)
+{
+    if (!requester || !bot)
+        return false;
+
+    PlayerbotAI* const botAI = GetBotAI(bot);
+    if (!botAI || !botAI->GetSecurity() ||
+        !botAI->GetSecurity()->CheckLevelFor(PLAYERBOT_SECURITY_ALLOW_ALL, true, requester))
+    {
+        return false;
+    }
+
+    PositionMap& positions = botAI->GetAiObjectContext()->GetValue<PositionMap&>("position")->Get();
+    PositionInfo& returnPosition = positions["return"];
+    PositionInfo& stayPosition = positions["stay"];
+
+    if (command == "stay")
+    {
+        botAI->Reset();
+        botAI->ChangeStrategy("+stay,-passive,-move from group", BOT_STATE_NON_COMBAT);
+        botAI->ChangeStrategy("+stay,-follow,-passive,-move from group", BOT_STATE_COMBAT);
+        returnPosition.Set(bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ(), bot->GetMapId());
+        stayPosition.Set(bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ(), bot->GetMapId());
+    }
+    else if (command == "follow")
+    {
+        botAI->ChangeStrategy("+follow,-passive,-grind,-move from group", BOT_STATE_NON_COMBAT);
+        botAI->ChangeStrategy("-stay,-follow,-passive,-grind,-move from group", BOT_STATE_COMBAT);
+        botAI->GetAiObjectContext()->GetValue<GuidVector>("prioritized targets")->Reset();
+        returnPosition.Reset();
+        stayPosition.Reset();
+    }
+    else
+    {
+        botAI->Reset();
+        botAI->ChangeStrategy("+follow,-stay,+passive", BOT_STATE_NON_COMBAT);
+        botAI->ChangeStrategy("+follow,-stay,+passive", BOT_STATE_COMBAT);
+        returnPosition.Reset();
+        stayPosition.Reset();
+    }
+
+    return VerifyGroupOrderState(botAI, command);
+}
+
+struct GroupOrderRateState
+{
+    std::deque<std::chrono::steady_clock::time_point> requests;
+};
+
+std::map<ObjectGuid, GroupOrderRateState> sGroupOrderRateStates;
+
+bool ConsumeGroupOrderRateLimit(Player* requester)
+{
+    if (!requester)
+        return false;
+
+    std::chrono::steady_clock::time_point const now = std::chrono::steady_clock::now();
+    ObjectGuid const requesterKey = requester->GetGUID();
+
+    if (sGroupOrderRateStates.size() >= kGroupOrderMaxRequesterStates &&
+        sGroupOrderRateStates.find(requesterKey) == sGroupOrderRateStates.end())
+    {
+        for (auto it = sGroupOrderRateStates.begin(); it != sGroupOrderRateStates.end();)
+        {
+            while (!it->second.requests.empty() && now - it->second.requests.front() >= kGroupOrderRateWindow)
+                it->second.requests.pop_front();
+
+            if (it->second.requests.empty())
+                it = sGroupOrderRateStates.erase(it);
+            else
+                ++it;
+        }
+
+        if (sGroupOrderRateStates.size() >= kGroupOrderMaxRequesterStates)
+            return false;
+    }
+
+    GroupOrderRateState& state = sGroupOrderRateStates[requesterKey];
+    while (!state.requests.empty() && now - state.requests.front() >= kGroupOrderRateWindow)
+        state.requests.pop_front();
+
+    if (state.requests.size() >= kGroupOrderRateLimit)
+        return false;
+
+    state.requests.push_back(now);
+    return true;
+}
+
+void SendGroupOrderAck(
+    Player* requester,
+    ChatMsg replyType,
+    std::string const& scope,
+    std::string const& target,
+    std::string const& token,
+    std::string const& command,
+    uint32 matched,
+    uint32 succeeded,
+    uint32 failed,
+    std::string const& reason)
+{
+    std::ostringstream payload;
+    payload << scope
+        << kFieldSeparator << UrlEncodeField(target)
+        << kFieldSeparator << token
+        << kFieldSeparator << UrlEncodeField(command)
+        << kFieldSeparator << matched
+        << kFieldSeparator << succeeded
+        << kFieldSeparator << failed
+        << kFieldSeparator << UrlEncodeField(reason);
+
+    SendStateAddonPacket(requester, replyType, "GROUP_ORDER_ACK", payload.str());
+}
+
+void RunGroupOrderCommand(
+    Player* requester,
+    ChatMsg replyType,
+    std::string const& scopeValue,
+    std::string const& encodedTarget,
+    std::string const& requestToken,
+    std::string const& encodedCommand)
+{
+    std::string const scope = ToUpper(Trim(scopeValue));
+    std::string target;
+    std::string rawCommand;
+    std::string command;
+    std::string selector;
+    std::string const token = Trim(requestToken);
+    uint32 matched = 0;
+    uint32 succeeded = 0;
+    uint32 failed = 0;
+    bool botLimitExceeded = false;
+    std::string reason = "OK";
+
+    if (!TryUrlDecodeField(encodedTarget, target, kMaxBotNameLength, true) ||
+        !TryUrlDecodeField(encodedCommand, rawCommand, kMaxCommandLength, false) ||
+        !TryNormalizeGroupOrder(rawCommand, command, selector))
+    {
+        SendGroupOrderAck(requester, replyType, scope, "", token, "", 0, 0, 0, "BAD_REQUEST");
+        return;
+    }
+
+    target = Trim(target);
+    if (!ConsumeGroupOrderRateLimit(requester))
+    {
+        SendGroupOrderAck(requester, replyType, scope, target, token, command, 0, 0, 0, "RATE_LIMIT");
+        return;
+    }
+
+    for (Player* const bot : GetBridgeVisibleBots(requester))
+    {
+        if (!BotMatchesCombatScope(requester, bot, scope, target) ||
+            !BotMatchesGroupOrderSelector(bot, selector))
+        {
+            continue;
+        }
+
+        if (matched >= kMaxGroupOrderMatchedBots)
+        {
+            botLimitExceeded = true;
+            continue;
+        }
+
+        ++matched;
+        if (ApplyNativeGroupOrder(requester, bot, command))
+            ++succeeded;
+        else
+            ++failed;
+    }
+
+    if (matched == 0)
+        reason = "NO_MATCH";
+    else if (botLimitExceeded)
+        reason = "BOT_LIMIT";
+    else if (failed > 0 && succeeded > 0)
+        reason = "PARTIAL";
+    else if (failed > 0)
+        reason = "FAILED";
+
+    SendGroupOrderAck(requester, replyType, scope, target, token, command, matched, succeeded, failed, reason);
+}
+
 void RunPositionCommand(Player* requester, ChatMsg replyType, std::string const& scopeValue, std::string const& encodedTarget, std::string const& requestToken, std::string const& encodedCommand)
 {
     std::string const scope = ToUpper(Trim(scopeValue));
@@ -14472,6 +14731,40 @@ bool HandleBridgeOpcode(Player* player, ChatMsg replyType, std::string const& op
             return SendProtocolError(player, replyType, normalized, requestType, "", "BAD_TOKEN");
 
         RunSummonCommand(player, replyType, fields[1], fields[2], fields[3]);
+        return true;
+    }
+
+    if (requestType == "GROUP_ORDER")
+    {
+        std::string const token = GetSafeErrorToken(fields, 3);
+        if (fields.size() != 5)
+            return SendProtocolError(player, replyType, normalized, requestType, token, "BAD_FIELD_COUNT");
+
+        std::string const scope = ToUpper(fields[1]);
+        if ((scope != "RAID" && scope != "GROUP" && scope != "PARTY" && scope != "BOT") ||
+            fields[1] != scope)
+        {
+            return SendProtocolError(player, replyType, normalized, requestType, token, "BAD_SCOPE");
+        }
+
+        if (!IsValidEncodedField(fields[2], kMaxBotNameLength, true))
+            return SendProtocolError(player, replyType, normalized, requestType, token, "BAD_ENCODING");
+
+        std::string decodedTarget;
+        if (!TryUrlDecodeField(fields[2], decodedTarget, kMaxBotNameLength, true) ||
+            (scope == "BOT" && Trim(decodedTarget).empty()) ||
+            (scope != "BOT" && !Trim(decodedTarget).empty()))
+        {
+            return SendProtocolError(player, replyType, normalized, requestType, token, "BAD_TARGET");
+        }
+
+        if (!IsValidRequestToken(fields[3]))
+            return SendProtocolError(player, replyType, normalized, requestType, "", "BAD_TOKEN");
+
+        if (!IsValidEncodedField(fields[4], kMaxCommandLength, false))
+            return SendProtocolError(player, replyType, normalized, requestType, token, "BAD_ENCODING");
+
+        RunGroupOrderCommand(player, replyType, fields[1], fields[2], fields[3], fields[4]);
         return true;
     }
 

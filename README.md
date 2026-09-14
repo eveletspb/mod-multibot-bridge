@@ -143,6 +143,7 @@ The Bridge currently advertises a growing set of dedicated capabilities, includi
 STATE_FRAMING_V1
 STRATEGY_MUTATION_V1
 SUMMON_V1
+GROUP_ORDER_V1
 OUTFIT_V1
 INVENTORY_V1
 INVENTORY_EXACT_V1
@@ -219,15 +220,15 @@ The Bridge is the primary adaptation layer for the MultiBot Chatless project and
 
 The project is intentionally described as **bridge-first / mostly chatless** until all remaining automatic legacy chat paths have been audited and either migrated, intentionally retained or removed.
 
-The next normal project item is a targeted read-only audit of the exact Playerbots selectors behind collective:
+Collective movement orders now use `GROUP_ORDER_V1` for the audited Playerbots commands:
 
 ```text
 follow
-attack
 stay
+flee
 ```
 
-before any dedicated structured group-order design is proposed.
+The endpoint returns one aggregate acknowledgement and verifies the resulting Playerbots strategy state without emitting per-bot chat replies.
 
 Deferred work is tracked in the addon roadmap:
 
