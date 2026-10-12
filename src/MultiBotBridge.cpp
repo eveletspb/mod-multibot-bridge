@@ -12447,14 +12447,14 @@ bool IsBotLifecycleControlRelationAllowed(
 
     uint32 const masterAccountId = requester->GetSession()->GetAccountId();
     bool const sameAccount =
-        sPlayerbotAIConfig.allowAccountBots
+        sPlayerbotAIConfig.AllowAccountBots
         && target.AccountId == masterAccountId;
 
     Guild* const guild = requester->GetGuildId()
         ? sGuildMgr->GetGuildById(requester->GetGuildId())
         : nullptr;
     bool const sameGuild =
-        sPlayerbotAIConfig.allowGuildBots
+        sPlayerbotAIConfig.AllowGuildBots
         && guild
         && guild->GetMember(targetGuid);
 
@@ -12462,7 +12462,7 @@ bool IsBotLifecycleControlRelationAllowed(
         sRandomPlayerbotMgr.IsAddclassBot(targetGuid.GetCounter());
 
     bool const linkedAccount =
-        sPlayerbotAIConfig.allowTrustedAccountBots
+        sPlayerbotAIConfig.AllowTrustedAccountBots
         && mgr->IsAccountLinked(target.AccountId, masterAccountId);
 
     // MB_BOT_LIFECYCLE_GROUP_AUTHORIZATION_B1_V1_BEGIN
@@ -12721,7 +12721,7 @@ void RunBotLifecycleConnect(
     std::size_t const pendingCount =
         CountBotLifecyclePendingConnects(requester);
     uint32 const maxBots =
-        uint32(PlayerbotAIConfig::instance().maxAddedBots);
+        uint32(PlayerbotAIConfig::Instance().MaxAddedBots);
     if (mgr->GetPlayerbotsCount() + pendingCount >= maxBots)
     {
         SendBotLifecycleResultPacket(
@@ -13410,10 +13410,10 @@ void RunSelfBotCommand(
         }
         else if (desiredActive && GET_PLAYERBOT_AI(requester) && !currentActive)
             reason = "AI_STATE_CONFLICT";
-        else if (desiredActive && sPlayerbotAIConfig.selfBotLevel == 0)
+        else if (desiredActive && sPlayerbotAIConfig.SelfBotLevel == 0)
             reason = "DISABLED";
         else if (desiredActive
-                 && sPlayerbotAIConfig.selfBotLevel == 1
+                 && sPlayerbotAIConfig.SelfBotLevel == 1
                  && !requester->CanBeGameMaster())
             reason = "FORBIDDEN";
         else
