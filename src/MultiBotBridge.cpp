@@ -1676,7 +1676,7 @@ bool BuildLevelAdjustedTalentSpecTabs(
 
     int startLevel = static_cast<int>(bot->GetLevel());
     while (startLevel > 1 && startLevel < 80 &&
-           sPlayerbotAIConfig.parsedSpecLinkOrder[classId][specIndex][startLevel].empty())
+           sPlayerbotAIConfig.ParsedSpecLinkOrder[classId][specIndex][startLevel].empty())
     {
         --startLevel;
     }
@@ -1685,7 +1685,7 @@ bool BuildLevelAdjustedTalentSpecTabs(
     for (int level = startLevel; level <= 80 && freePoints; ++level)
     {
         std::vector<std::vector<uint32>> const& order =
-            sPlayerbotAIConfig.parsedSpecLinkOrder[classId][specIndex][level];
+            sPlayerbotAIConfig.ParsedSpecLinkOrder[classId][specIndex][level];
         if (order.empty())
             continue;
 
@@ -10614,15 +10614,15 @@ void RunSelfActionCommand(
         {
             if (!argument.empty())
                 reason = "BAD_ARGUMENT";
-            else if (!sPlayerbotAIConfig.autoGearCommand)
+            else if (!sPlayerbotAIConfig.AutoGearCommand)
                 reason = "DISABLED";
-            else if (!sPlayerbotAIConfig.autoGearCommandAltBots &&
+            else if (!sPlayerbotAIConfig.AutoGearCommandAltBots &&
                      !sPlayerbotAIConfig.IsInRandomAccountList(requester->GetSession()->GetAccountId()))
                 reason = "ALT_BOT_REFUSED";
             else
             {
-                uint32 const quality = static_cast<uint32>(sPlayerbotAIConfig.autoGearQualityLimit);
-                uint32 const ilvl = static_cast<uint32>(sPlayerbotAIConfig.autoGearScoreLimit);
+                uint32 const quality = static_cast<uint32>(sPlayerbotAIConfig.AutoGearQualityLimit);
+                uint32 const ilvl = static_cast<uint32>(sPlayerbotAIConfig.AutoGearScoreLimit);
                 PlayerbotFactory::AutoGear(requester, quality, ilvl, true);
                 ok = true;
                 reason = "APPLIED";
@@ -10632,7 +10632,7 @@ void RunSelfActionCommand(
         {
             if (!argument.empty())
                 reason = "BAD_ARGUMENT";
-            else if (!sPlayerbotAIConfig.maintenanceCommand)
+            else if (!sPlayerbotAIConfig.MaintenanceCommand)
                 reason = "DISABLED";
             else
             {
@@ -10658,49 +10658,49 @@ void RunSelfActionCommand(
                     factory.InitMounts();
                     factory.InitGlyphs(false);
                     factory.InitKeyring();
-                    if (requester->GetLevel() >= sPlayerbotAIConfig.minEnchantingBotLevel)
+                    if (requester->GetLevel() >= sPlayerbotAIConfig.MinEnchantingBotLevel)
                         factory.ApplyEnchantAndGemsNew();
                 }
                 else
                 {
-                    if (sPlayerbotAIConfig.altMaintenanceAttunementQs)
+                    if (sPlayerbotAIConfig.AltMaintenanceAttunementQs)
                         factory.InitAttunementQuests();
-                    if (sPlayerbotAIConfig.altMaintenanceBags)
+                    if (sPlayerbotAIConfig.AltMaintenanceBags)
                         factory.InitBags(false);
-                    if (sPlayerbotAIConfig.altMaintenanceAmmo)
+                    if (sPlayerbotAIConfig.AltMaintenanceAmmo)
                         factory.InitAmmo();
-                    if (sPlayerbotAIConfig.altMaintenanceFood)
+                    if (sPlayerbotAIConfig.AltMaintenanceFood)
                         factory.InitFood();
-                    if (sPlayerbotAIConfig.altMaintenanceReagents)
+                    if (sPlayerbotAIConfig.AltMaintenanceReagents)
                         factory.InitReagents();
-                    if (sPlayerbotAIConfig.altMaintenanceConsumables)
+                    if (sPlayerbotAIConfig.AltMaintenanceConsumables)
                         factory.InitConsumables();
-                    if (sPlayerbotAIConfig.altMaintenancePotions)
+                    if (sPlayerbotAIConfig.AltMaintenancePotions)
                         factory.InitPotions();
-                    if (sPlayerbotAIConfig.altMaintenanceTalentTree)
+                    if (sPlayerbotAIConfig.AltMaintenanceTalentTree)
                         factory.InitTalentsTree(true);
-                    if (sPlayerbotAIConfig.altMaintenancePet)
+                    if (sPlayerbotAIConfig.AltMaintenancePet)
                         factory.InitPet();
-                    if (sPlayerbotAIConfig.altMaintenancePetTalents)
+                    if (sPlayerbotAIConfig.AltMaintenancePetTalents)
                         factory.InitPetTalents();
-                    if (sPlayerbotAIConfig.altMaintenanceSkills)
+                    if (sPlayerbotAIConfig.AltMaintenanceSkills)
                         factory.InitSkills();
-                    if (sPlayerbotAIConfig.altMaintenanceClassSpells)
+                    if (sPlayerbotAIConfig.AltMaintenanceClassSpells)
                         factory.InitClassSpells();
-                    if (sPlayerbotAIConfig.altMaintenanceAvailableSpells)
+                    if (sPlayerbotAIConfig.AltMaintenanceAvailableSpells)
                         factory.InitAvailableSpells();
-                    if (sPlayerbotAIConfig.altMaintenanceReputation)
+                    if (sPlayerbotAIConfig.AltMaintenanceReputation)
                         factory.InitReputation();
-                    if (sPlayerbotAIConfig.altMaintenanceSpecialSpells)
+                    if (sPlayerbotAIConfig.AltMaintenanceSpecialSpells)
                         factory.InitSpecialSpells();
-                    if (sPlayerbotAIConfig.altMaintenanceMounts)
+                    if (sPlayerbotAIConfig.AltMaintenanceMounts)
                         factory.InitMounts();
-                    if (sPlayerbotAIConfig.altMaintenanceGlyphs)
+                    if (sPlayerbotAIConfig.AltMaintenanceGlyphs)
                         factory.InitGlyphs(false);
-                    if (sPlayerbotAIConfig.altMaintenanceKeyring)
+                    if (sPlayerbotAIConfig.AltMaintenanceKeyring)
                         factory.InitKeyring();
-                    if (sPlayerbotAIConfig.altMaintenanceGemsEnchants &&
-                        requester->GetLevel() >= sPlayerbotAIConfig.minEnchantingBotLevel)
+                    if (sPlayerbotAIConfig.AltMaintenanceGemsEnchants &&
+                        requester->GetLevel() >= sPlayerbotAIConfig.MinEnchantingBotLevel)
                         factory.ApplyEnchantAndGemsNew();
                 }
 
