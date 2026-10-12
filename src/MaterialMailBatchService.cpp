@@ -366,7 +366,7 @@ MaterialMailBatchResult ExecuteMaterialMailBatch(Player* requester, std::vector<
         return result;
     }
 
-    if (!sPlayerbotAIConfig.botSendMailEnabled)
+    if (!sPlayerbotAIConfig.BotSendMailEnabled)
     {
         result.reason = "DISABLED";
         return result;
