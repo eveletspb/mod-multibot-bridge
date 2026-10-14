@@ -237,7 +237,7 @@ bool IsCrossFactionMailBlocked(Player* requester, Player* bot)
 std::string GetBotEligibilityFailure(Player* requester, Player* bot, PlayerbotAI* botAI)
 {
     if (!bot || !bot->GetSession() || !bot->IsInWorld() || bot->IsDuringRemoveFromWorld() ||
-        bot->GetSession()->isLogingOut())
+        bot->GetSession()->IsLoggingOut())
     {
         return "BOT_UNAVAILABLE";
     }
