@@ -1542,13 +1542,11 @@ std::string BuildTalentLinkPointSummary(std::string const& link)
     return out.str();
 }
 
-std::string GetPremadeSpecConfigString(std::string const& key)
-{
-    return Trim(sConfigMgr->GetOption<std::string>(key, ""));
-}
-
 std::string GetPremadeSpecLink(uint8 classId, uint32 specIndex, uint32 botLevel)
 {
+    if (classId >= MAX_CLASSES || specIndex >= MAX_SPECNO)
+        return "";
+
     std::vector<uint32> levels;
     levels.push_back(botLevel);
     levels.push_back(80);
@@ -1565,10 +1563,7 @@ std::string GetPremadeSpecLink(uint8 classId, uint32 specIndex, uint32 botLevel)
 
         seen.insert(level);
 
-        std::ostringstream key;
-        key << "AiPlayerbot.PremadeSpecLink." << static_cast<uint32>(classId) << '.' << specIndex << '.' << level;
-
-        std::string const link = GetPremadeSpecConfigString(key.str());
+        std::string const& link = sPlayerbotAIConfig.PremadeSpecLink[classId][specIndex][level];
         if (!link.empty())
             return link;
     }
@@ -1766,13 +1761,12 @@ std::vector<TalentSpecEntryData> BuildTalentSpecEntries(Player* bot)
         return entries;
 
     uint8 const classId = static_cast<uint8>(bot->getClass());
+    if (classId >= MAX_CLASSES)
+        return entries;
 
-    for (uint32 specIndex = 0; specIndex <= 30; ++specIndex)
+    for (uint32 specIndex = 0; specIndex < MAX_SPECNO; ++specIndex)
     {
-        std::ostringstream nameKey;
-        nameKey << "AiPlayerbot.PremadeSpecName." << static_cast<uint32>(classId) << '.' << specIndex;
-
-        std::string const specName = GetPremadeSpecConfigString(nameKey.str());
+        std::string const& specName = sPlayerbotAIConfig.PremadeSpecName[classId][specIndex];
         if (specName.empty())
             continue;
 
