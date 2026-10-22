@@ -109,9 +109,6 @@ std::size_t constexpr kSummonRateLimit = 64;
 std::chrono::milliseconds constexpr kSummonRateWindow(2000);
 std::size_t constexpr kSummonMaxRequesterStates = 512;
 std::size_t constexpr kMaxGroupOrderMatchedBots = 128;
-std::size_t constexpr kGroupOrderRateLimit = 16;
-std::chrono::milliseconds constexpr kGroupOrderRateWindow(2000);
-std::size_t constexpr kGroupOrderMaxRequesterStates = 512;
 std::chrono::seconds constexpr kMaterialMailCooldown(5);
 std::chrono::seconds constexpr kMaterialMailReplayTtl(30);
 std::size_t constexpr kMaterialMailMaxRecentTokens = 16;
@@ -10016,7 +10013,7 @@ struct GroupOrderRateState
     std::deque<std::pair<std::string, std::chrono::steady_clock::time_point>> recentTokens;
 };
 
-std::map<std::string, GroupOrderRateState> sGroupOrderRateStates;
+std::map<ObjectGuid, GroupOrderRateState> sGroupOrderRateStates;
 
 bool ConsumeGroupOrderRateLimit(Player* requester)
 {
@@ -10024,8 +10021,8 @@ bool ConsumeGroupOrderRateLimit(Player* requester)
         return false;
 
     std::chrono::steady_clock::time_point const now = std::chrono::steady_clock::now();
-    std::string const key = requester->GetName();
-    auto stateIt = sGroupOrderRateStates.find(key);
+    ObjectGuid const requesterKey = requester->GetGUID();
+    auto stateIt = sGroupOrderRateStates.find(requesterKey);
 
     if (stateIt == sGroupOrderRateStates.end())
     {
@@ -10048,7 +10045,7 @@ bool ConsumeGroupOrderRateLimit(Player* requester)
         if (sGroupOrderRateStates.size() >= kGroupOrderMaxRequesterStates)
             return false;
 
-        stateIt = sGroupOrderRateStates.emplace(key, GroupOrderRateState{}).first;
+        stateIt = sGroupOrderRateStates.emplace(requesterKey, GroupOrderRateState{}).first;
     }
 
     GroupOrderRateState& state = stateIt->second;
@@ -10068,8 +10065,8 @@ bool RegisterGroupOrderToken(Player* requester, std::string const& token)
         return false;
 
     std::chrono::steady_clock::time_point const now = std::chrono::steady_clock::now();
-    std::string const key = requester->GetName();
-    auto stateIt = sGroupOrderRateStates.find(key);
+    ObjectGuid const requesterKey = requester->GetGUID();
+    auto stateIt = sGroupOrderRateStates.find(requesterKey);
     if (stateIt == sGroupOrderRateStates.end())
         return false;
 
@@ -17256,50 +17253,6 @@ bool ApplyNativeGroupOrder(Player* requester, Player* bot, std::string const& co
     }
 
     return VerifyGroupOrderState(requester, bot, botAI, command);
-}
-
-struct GroupOrderRateState
-{
-    std::deque<std::chrono::steady_clock::time_point> requests;
-};
-
-std::map<ObjectGuid, GroupOrderRateState> sGroupOrderRateStates;
-
-bool ConsumeGroupOrderRateLimit(Player* requester)
-{
-    if (!requester)
-        return false;
-
-    std::chrono::steady_clock::time_point const now = std::chrono::steady_clock::now();
-    ObjectGuid const requesterKey = requester->GetGUID();
-
-    if (sGroupOrderRateStates.size() >= kGroupOrderMaxRequesterStates &&
-        sGroupOrderRateStates.find(requesterKey) == sGroupOrderRateStates.end())
-    {
-        for (auto it = sGroupOrderRateStates.begin(); it != sGroupOrderRateStates.end();)
-        {
-            while (!it->second.requests.empty() && now - it->second.requests.front() >= kGroupOrderRateWindow)
-                it->second.requests.pop_front();
-
-            if (it->second.requests.empty())
-                it = sGroupOrderRateStates.erase(it);
-            else
-                ++it;
-        }
-
-        if (sGroupOrderRateStates.size() >= kGroupOrderMaxRequesterStates)
-            return false;
-    }
-
-    GroupOrderRateState& state = sGroupOrderRateStates[requesterKey];
-    while (!state.requests.empty() && now - state.requests.front() >= kGroupOrderRateWindow)
-        state.requests.pop_front();
-
-    if (state.requests.size() >= kGroupOrderRateLimit)
-        return false;
-
-    state.requests.push_back(now);
-    return true;
 }
 
 void SendGroupOrderAck(
