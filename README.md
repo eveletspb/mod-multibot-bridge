@@ -561,6 +561,11 @@ Historical Jellypowered bridge contributions were audited and selectively adapte
 
 # Troubleshooting
 
+### Vendor sale reports a failure after startup
+
+The Bridge prepares craft-output protection during server startup. If the world database loot tables cannot be read,
+`SELL_VENDOR` is disabled to protect crafted items. Check the startup log, restore database access and restart the server.
+
 ### The module does not load
 
 Confirm that:
@@ -573,6 +578,11 @@ Confirm that:
 ### The addon reports Bridge unavailable
 
 Confirm the client is using the matching MultiBot Chatless addon and that the worldserver loaded `mod-multibot-bridge`.
+
+### Run the focused local checks
+
+Run `python3 tests/performance_paths_test.py` with a C++20 compiler available. These checks use Core stubs; they do not
+replace a worldserver build or in-game tests.
 
 <!-- DOC_SYNC_2026_09_26_GLOBAL_CHAT_AUDIT_V2 -->
 # 26 September 2026 — Structured Closeout Baseline

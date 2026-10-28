@@ -1,4 +1,6 @@
 #include "Bag.h"
+#include "ArenaTeam.h"
+#include "ArenaTeamMgr.h"
 #include "Chat.h"
 #include "CharacterCache.h"
 #include "Config.h"
@@ -52,6 +54,7 @@
 #include "World.h"
 #include "WorldPacket.h"
 #include "WorldSession.h"
+#include "WorldScript.h"
 
 #include <algorithm>
 #include <random>
@@ -65,6 +68,7 @@
 #include <limits>
 #include <list>
 #include <map>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <string>
@@ -359,7 +363,8 @@ Player* FindBotByName(Player* player, std::string const& botName);
 PlayerbotAI* GetBotAI(Player* bot);
 bool ConsumeSelfBotRequestRateLimit(Player* requester);
 bool ConsumeSelfBotHeavyActionRateLimit(Player* requester);
-std::vector<Player*> GetBridgeVisibleBots(Player* player);
+std::vector<Player*> GetBridgeVisibleBots(Player* player, bool groupOnly = false);
+std::vector<Player*> GetBridgeVisibleBotsForScope(Player* player, std::string const& scope, std::string const& target);
 void SendAddonPacket(Player* player, ChatMsg chatType, std::string const& opcode, std::string const& payload = "");
 bool SendStateAddonPacket(Player* player, ChatMsg chatType, std::string const& opcode, std::string const& payload);
 bool SendProtocolError(Player* player, ChatMsg chatType, std::string const& opcode, std::string const& requestType, std::string const& token, std::string const& reason);
@@ -1595,21 +1600,6 @@ std::string BuildBotProfessionPayload(Player* bot)
     return first ? "" : out.str();
 }
 
-uint8 ArenaTeamTypeToPayloadIndex(uint8 type)
-{
-    switch (type)
-    {
-        case 2:
-            return 0;
-        case 3:
-            return 1;
-        case 5:
-            return 2;
-        default:
-            return 3;
-    }
-}
-
 PvpStatsData BuildPvpStatsData(Player* bot)
 {
     PvpStatsData data;
@@ -1620,28 +1610,14 @@ PvpStatsData BuildPvpStatsData(Player* bot)
     data.arenaPoints = bot->GetArenaPoints();
     data.honorPoints = bot->GetHonorPoints();
 
-    QueryResult result = CharacterDatabase.Query(
-        "SELECT at.type, at.name, at.rating "
-        "FROM arena_team_member atm "
-        "INNER JOIN arena_team at ON at.arenaTeamId = atm.arenaTeamId "
-        "WHERE atm.guid = {}",
-        bot->GetGUID().GetCounter());
-
-    if (!result)
-        return data;
-
-    do
+    for (uint8 slot = 0; slot < data.teams.size(); ++slot)
     {
-        Field* const fields = result->Fetch();
-        uint8 const type = fields[0].Get<uint8>();
-        uint8 const index = ArenaTeamTypeToPayloadIndex(type);
-        if (index >= data.teams.size())
-            continue;
-
-        data.teams[index].name = fields[1].Get<std::string>();
-        data.teams[index].rating = fields[2].Get<uint32>();
+        if (ArenaTeam const* const team = sArenaTeamMgr->GetArenaTeamById(bot->GetArenaTeamId(slot)))
+        {
+            data.teams[slot].name = team->GetName();
+            data.teams[slot].rating = team->GetRating();
+        }
     }
-    while (result->NextRow());
 
     return data;
 }
@@ -2146,11 +2122,14 @@ std::vector<QuestEntryData> BuildQuestEntries(Player* bot, std::string const& mo
     if (!bot)
         return entries;
 
+    bool hasQuest = false;
     for (uint16 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
     {
         uint32 const questId = bot->GetQuestSlotQuestId(slot);
         if (!questId)
             continue;
+
+        hasQuest = true;
 
         QuestStatus const status = bot->GetQuestStatus(questId);
         if (status == QUEST_STATUS_COMPLETE)
@@ -2159,7 +2138,7 @@ std::vector<QuestEntryData> BuildQuestEntries(Player* bot, std::string const& mo
             AppendQuestEntry(entries, seen, questId, false, mode);
     }
 
-    if (!entries.empty())
+    if (hasQuest)
     {
         SortQuestEntries(entries);
         return entries;
@@ -4599,7 +4578,26 @@ void AddItemEntryToSnapshot(std::map<uint32, uint32>& itemCounts, std::map<uint3
     itemTemplates[itemId] = proto;
 }
 
-int32 GetGuildBankTabWithdrawRemaining(Guild* guild, Player* player, uint8 tabId)
+using GuildBankRights = std::map<std::pair<uint8, uint8>, std::pair<uint32, uint32>>;
+
+GuildBankRights GetGuildBankRights(Guild* guild)
+{
+    GuildBankRights rights;
+    QueryResult result = CharacterDatabase.Query(
+        "SELECT rid, TabId, gbright, SlotPerDay FROM guild_bank_right WHERE guildid = {}", guild->GetId());
+    if (result)
+    {
+        do
+        {
+            Field* const fields = result->Fetch();
+            rights[{fields[0].Get<uint8>(), fields[1].Get<uint8>()}] =
+                {fields[2].Get<uint32>(), fields[3].Get<uint32>()};
+        } while (result->NextRow());
+    }
+    return rights;
+}
+
+int32 GetGuildBankTabWithdrawRemaining(Guild* guild, Player* player, uint8 tabId, GuildBankRights const& rightsByRank)
 {
     if (!guild || !player)
         return 0;
@@ -4611,17 +4609,12 @@ int32 GetGuildBankTabWithdrawRemaining(Guild* guild, Player* player, uint8 tabId
     if (member->IsRank(GR_GUILDMASTER) || guild->GetLeaderGUID() == player->GetGUID())
         return std::numeric_limits<int32>::max();
 
-    QueryResult result = CharacterDatabase.Query(
-        "SELECT gbright, SlotPerDay FROM guild_bank_right "
-        "WHERE guildid = {} AND TabId = {} AND rid = {}",
-        guild->GetId(), uint32(tabId), uint32(member->GetRankId()));
-
-    if (!result)
+    auto const rightsIt = rightsByRank.find({member->GetRankId(), tabId});
+    if (rightsIt == rightsByRank.end())
         return 0;
 
-    Field* const fields = result->Fetch();
-    uint32 const rights = fields[0].Get<uint32>();
-    uint32 const slotsPerDay = fields[1].Get<uint32>();
+    uint32 const rights = rightsIt->second.first;
+    uint32 const slotsPerDay = rightsIt->second.second;
 
     if ((rights & GUILD_BANK_RIGHT_VIEW_TAB) == 0 || slotsPerDay == 0)
         return 0;
@@ -4635,7 +4628,7 @@ int32 GetGuildBankTabWithdrawRemaining(Guild* guild, Player* player, uint8 tabId
 }
 
 
-int32 GetEffectiveGuildBankWithdrawRemaining(Guild* guild, Player* requester, Player* bot)
+int32 GetEffectiveGuildBankWithdrawRemaining(Guild* guild, Player* requester, Player* bot, GuildBankRights const& rights)
 {
     if (!guild || !requester || !bot)
         return 0;
@@ -4643,8 +4636,8 @@ int32 GetEffectiveGuildBankWithdrawRemaining(Guild* guild, Player* requester, Pl
     int32 bestRemaining = 0;
     for (uint8 tabId = 0; tabId < GUILD_BANK_MAX_TABS; ++tabId)
     {
-        int32 const requesterRemaining = GetGuildBankTabWithdrawRemaining(guild, requester, tabId);
-        int32 const botRemaining = GetGuildBankTabWithdrawRemaining(guild, bot, tabId);
+        int32 const requesterRemaining = GetGuildBankTabWithdrawRemaining(guild, requester, tabId, rights);
+        int32 const botRemaining = GetGuildBankTabWithdrawRemaining(guild, bot, tabId, rights);
         int32 const effectiveRemaining = std::min(requesterRemaining, botRemaining);
 
         if (effectiveRemaining == std::numeric_limits<int32>::max())
@@ -4657,12 +4650,12 @@ int32 GetEffectiveGuildBankWithdrawRemaining(Guild* guild, Player* requester, Pl
     return bestRemaining;
 }
 
-bool ConsumeGuildBankWithdrawSlot(Guild* guild, Player* player, uint8 tabId)
+bool ConsumeGuildBankWithdrawSlot(Guild* guild, Player* player, uint8 tabId, GuildBankRights const& rights)
 {
     if (!guild || !player)
         return false;
 
-    int32 const remaining = GetGuildBankTabWithdrawRemaining(guild, player, tabId);
+    int32 const remaining = GetGuildBankTabWithdrawRemaining(guild, player, tabId, rights);
     if (remaining == std::numeric_limits<int32>::max())
         return true;
 
@@ -4775,7 +4768,8 @@ void SendGuildBankPackets(Player* requester, ChatMsg replyType, std::string cons
         return;
     }
 
-    int32 const withdrawRemaining = GetEffectiveGuildBankWithdrawRemaining(guild, requester, bot);
+    GuildBankRights const rights = GetGuildBankRights(guild);
+    int32 const withdrawRemaining = GetEffectiveGuildBankWithdrawRemaining(guild, requester, bot, rights);
     SendAddonPacket(
         requester,
         replyType,
@@ -4788,27 +4782,21 @@ void SendGuildBankPackets(Player* requester, ChatMsg replyType, std::string cons
     std::map<uint32, uint32> itemCounts;
     std::map<uint32, ItemTemplate const*> itemTemplates;
 
-    for (uint8 tabId = 0; tabId < GUILD_BANK_MAX_TABS; ++tabId)
+    QueryResult result = CharacterDatabase.Query(
+        "SELECT gbi.TabId, ii.itemEntry, ii.count "
+        "FROM guild_bank_item gbi "
+        "INNER JOIN item_instance ii ON ii.guid = gbi.item_guid "
+        "WHERE gbi.guildid = {} ORDER BY gbi.TabId, gbi.SlotId", guild->GetId());
+    if (result)
     {
-        if (!guild->MemberHasTabRights(requester->GetGUID(), tabId, GUILD_BANK_RIGHT_VIEW_TAB)
-            || !guild->MemberHasTabRights(bot->GetGUID(), tabId, GUILD_BANK_RIGHT_VIEW_TAB))
-            continue;
-
-        QueryResult result = CharacterDatabase.Query(
-            "SELECT ii.itemEntry, ii.count "
-            "FROM guild_bank_item gbi "
-            "INNER JOIN item_instance ii ON ii.guid = gbi.item_guid "
-            "WHERE gbi.guildid = {} AND gbi.TabId = {} "
-            "ORDER BY gbi.SlotId",
-            guild->GetId(), uint32(tabId));
-
-        if (!result)
-            continue;
-
         do
         {
             Field* const fields = result->Fetch();
-            AddItemEntryToSnapshot(itemCounts, itemTemplates, fields[0].Get<uint32>(), fields[1].Get<uint32>());
+            uint8 const tabId = fields[0].Get<uint8>();
+            if (tabId < GUILD_BANK_MAX_TABS &&
+                guild->MemberHasTabRights(requester->GetGUID(), tabId, GUILD_BANK_RIGHT_VIEW_TAB) &&
+                guild->MemberHasTabRights(bot->GetGUID(), tabId, GUILD_BANK_RIGHT_VIEW_TAB))
+                AddItemEntryToSnapshot(itemCounts, itemTemplates, fields[1].Get<uint32>(), fields[2].Get<uint32>());
         }
         while (result->NextRow());
     }
@@ -6037,7 +6025,8 @@ uint32 MoveMatchingGuildBankItemsToBags(Player* requester, Player* bot, uint32 i
         return 0;
     }
 
-    if (GetEffectiveGuildBankWithdrawRemaining(guild, requester, bot) == 0)
+    GuildBankRights const rights = GetGuildBankRights(guild);
+    if (GetEffectiveGuildBankWithdrawRemaining(guild, requester, bot, rights) == 0)
     {
         reason = "NO_GUILD_BANK_RIGHTS";
         return 0;
@@ -6069,8 +6058,8 @@ uint32 MoveMatchingGuildBankItemsToBags(Player* requester, Player* bot, uint32 i
         uint32 const stackCount = fields[2].Get<uint32>();
         foundAny = true;
 
-        if (GetGuildBankTabWithdrawRemaining(guild, requester, tabId) == 0
-            || GetGuildBankTabWithdrawRemaining(guild, bot, tabId) == 0)
+        if (tabId >= GUILD_BANK_MAX_TABS || GetGuildBankTabWithdrawRemaining(guild, requester, tabId, rights) == 0
+            || GetGuildBankTabWithdrawRemaining(guild, bot, tabId, rights) == 0)
             continue;
 
         foundWithdrawable = true;
@@ -6095,7 +6084,7 @@ uint32 MoveMatchingGuildBankItemsToBags(Player* requester, Player* bot, uint32 i
         {
             moved += after - before;
             if (requester->GetGUID() != bot->GetGUID())
-                ConsumeGuildBankWithdrawSlot(guild, requester, tabId);
+                ConsumeGuildBankWithdrawSlot(guild, requester, tabId, rights);
         }
 
         if (requestedCount > 0 && moved >= requestedCount)
@@ -6348,14 +6337,14 @@ std::array<SkillType, 14> const& GetBridgeCraftProtectionSkills()
 
 using BridgeReferenceLootRows = std::map<uint32, std::vector<std::pair<uint32, uint32>>>;
 
-BridgeReferenceLootRows BuildBridgeReferenceLootRows()
+std::optional<BridgeReferenceLootRows> BuildBridgeReferenceLootRows()
 {
     BridgeReferenceLootRows rows;
 
     QueryResult result = WorldDatabase.Query(
-        "SELECT Entry, Item, Reference FROM reference_loot_template");
+        "SELECT Entry, Item, Reference FROM reference_loot_template UNION ALL SELECT 0, 0, 0");
     if (!result)
-        return rows;
+        return std::nullopt;
 
     do
     {
@@ -6371,14 +6360,14 @@ BridgeReferenceLootRows BuildBridgeReferenceLootRows()
     return rows;
 }
 
-BridgeReferenceLootRows BuildBridgeLootTableRows(char const* tableName)
+std::optional<BridgeReferenceLootRows> BuildBridgeLootTableRows(char const* tableName)
 {
     BridgeReferenceLootRows rows;
 
     QueryResult result = WorldDatabase.Query(
-        "SELECT Entry, Item, Reference FROM {}", tableName);
+        "SELECT Entry, Item, Reference FROM {} UNION ALL SELECT 0, 0, 0", tableName);
     if (!result)
-        return rows;
+        return std::nullopt;
 
     do
     {
@@ -6458,13 +6447,13 @@ void AddBridgeCraftAndSpellLootOutputs(uint32 spellId,
         AddBridgeLootEntryOutputs(visitedSpellId, spellLootRows, referenceRows, itemIds);
 }
 
-void AddBridgeLootTableOutputs(char const* tableName,
+bool AddBridgeLootTableOutputs(char const* tableName,
                                BridgeReferenceLootRows const& referenceRows,
                                std::set<uint32>& itemIds)
 {
-    QueryResult result = WorldDatabase.Query("SELECT Item, Reference FROM {}", tableName);
+    QueryResult result = WorldDatabase.Query("SELECT Item, Reference FROM {} UNION ALL SELECT 0, 0", tableName);
     if (!result)
-        return;
+        return false;
 
     std::set<uint32> references;
     do
@@ -6481,19 +6470,23 @@ void AddBridgeLootTableOutputs(char const* tableName,
     } while (result->NextRow());
 
     AddBridgeReferenceLootOutputs(references, referenceRows, itemIds);
+    return true;
 }
-std::map<uint32, std::set<uint32>> const& GetBridgeCraftOutputsBySkill()
+std::optional<std::map<uint32, std::set<uint32>>> const& GetBridgeCraftOutputsBySkill()
 {
     // The source data is process-wide and immutable for normal runtime use.
     // Function-local static initialization is thread-safe, so the expensive
     // SkillLineAbility, item-template, and loot-table scans run only once.
-    static std::map<uint32, std::set<uint32>> const outputsBySkill = []()
+    static std::optional<std::map<uint32, std::set<uint32>>> const outputsBySkill = []()
+        -> std::optional<std::map<uint32, std::set<uint32>>>
     {
         std::map<uint32, std::set<uint32>> outputs;
 
-        BridgeReferenceLootRows const referenceLootRows = BuildBridgeReferenceLootRows();
-        BridgeReferenceLootRows const spellLootRows =
+        auto const referenceLootRows = BuildBridgeReferenceLootRows();
+        auto const spellLootRows =
             BuildBridgeLootTableRows("spell_loot_template");
+        if (!referenceLootRows || !spellLootRows)
+            return std::nullopt;
 
         for (SkillType const skill : GetBridgeCraftProtectionSkills())
         {
@@ -6504,7 +6497,7 @@ std::map<uint32, std::set<uint32>> const& GetBridgeCraftOutputsBySkill()
             {
                 if (ability)
                     AddBridgeCraftAndSpellLootOutputs(
-                        ability->Spell, spellLootRows, referenceLootRows, skillOutputs);
+                        ability->Spell, *spellLootRows, *referenceLootRows, skillOutputs);
             }
         }
 
@@ -6513,37 +6506,37 @@ std::map<uint32, std::set<uint32>> const& GetBridgeCraftOutputsBySkill()
         // corresponding profession set. Random spell-loot outputs and every
         // reachable TriggerSpell are covered by the same helper.
         std::vector<ItemTemplate*> const* const itemTemplates = sObjectMgr->GetItemTemplateStoreFast();
-        if (itemTemplates)
+        if (!itemTemplates)
+            return std::nullopt;
+        for (ItemTemplate const* const recipe : *itemTemplates)
         {
-            for (ItemTemplate const* const recipe : *itemTemplates)
-            {
-                uint32 const skillId = GetBridgeRecipeSkillId(recipe);
-                auto const outputIt = outputs.find(skillId);
-                if (!skillId || outputIt == outputs.end())
-                    continue;
+            uint32 const skillId = GetBridgeRecipeSkillId(recipe);
+            auto const outputIt = outputs.find(skillId);
+            if (!skillId || outputIt == outputs.end())
+                continue;
 
-                for (uint8 i = 0; i < MAX_ITEM_PROTO_SPELLS; ++i)
-                {
-                    uint32 const spellId = recipe->Spells[i].SpellId;
-                    if (spellId)
-                        AddBridgeCraftAndSpellLootOutputs(
-                            spellId, spellLootRows, referenceLootRows, outputIt->second);
-                }
+            for (uint8 i = 0; i < MAX_ITEM_PROTO_SPELLS; ++i)
+            {
+                uint32 const spellId = recipe->Spells[i].SpellId;
+                if (spellId)
+                    AddBridgeCraftAndSpellLootOutputs(
+                        spellId, *spellLootRows, *referenceLootRows, outputIt->second);
             }
         }
 
         // Prospecting, milling, and disenchanting use dedicated loot templates.
         // Include every possible output and follow reference_loot_template
         // recursively in the same process-wide cache used by SELL_VENDOR.
-        AddBridgeLootTableOutputs(
-            "prospecting_loot_template", referenceLootRows,
-            outputs[static_cast<uint32>(SKILL_JEWELCRAFTING)]);
-        AddBridgeLootTableOutputs(
-            "milling_loot_template", referenceLootRows,
-            outputs[static_cast<uint32>(SKILL_INSCRIPTION)]);
-        AddBridgeLootTableOutputs(
-            "disenchant_loot_template", referenceLootRows,
-            outputs[static_cast<uint32>(SKILL_ENCHANTING)]);
+        if (!AddBridgeLootTableOutputs(
+                "prospecting_loot_template", *referenceLootRows,
+                outputs[static_cast<uint32>(SKILL_JEWELCRAFTING)]) ||
+            !AddBridgeLootTableOutputs(
+                "milling_loot_template", *referenceLootRows,
+                outputs[static_cast<uint32>(SKILL_INSCRIPTION)]) ||
+            !AddBridgeLootTableOutputs(
+                "disenchant_loot_template", *referenceLootRows,
+                outputs[static_cast<uint32>(SKILL_ENCHANTING)]))
+            return std::nullopt;
 
         return outputs;
     }();
@@ -6551,25 +6544,26 @@ std::map<uint32, std::set<uint32>> const& GetBridgeCraftOutputsBySkill()
     return outputsBySkill;
 }
 
-std::set<uint32> BuildBridgeCraftProtectedItemIds(PlayerbotAI* botAI)
+bool BuildBridgeCraftProtectedItemIds(PlayerbotAI* botAI, std::set<uint32>& itemIds)
 {
-    std::set<uint32> itemIds;
     if (!botAI)
-        return itemIds;
+        return false;
 
-    std::map<uint32, std::set<uint32>> const& outputsBySkill = GetBridgeCraftOutputsBySkill();
+    auto const& outputsBySkill = GetBridgeCraftOutputsBySkill();
+    if (!outputsBySkill)
+        return false;
 
     for (SkillType const skill : GetBridgeCraftProtectionSkills())
     {
         if (!botAI->HasSkill(skill))
             continue;
 
-        auto const outputIt = outputsBySkill.find(static_cast<uint32>(skill));
-        if (outputIt != outputsBySkill.end())
+        auto const outputIt = outputsBySkill->find(static_cast<uint32>(skill));
+        if (outputIt != outputsBySkill->end())
             itemIds.insert(outputIt->second.begin(), outputIt->second.end());
     }
 
-    return itemIds;
+    return true;
 }
 
 bool IsBridgeSellVendorCandidate(Player* bot, PlayerbotAI* botAI, Item* item,
@@ -6638,7 +6632,12 @@ uint32 SellVendorBagItems(Player* bot, std::string& reason)
         return 0;
     }
 
-    std::set<uint32> const protectedCraftItemIds = BuildBridgeCraftProtectedItemIds(botAI);
+    std::set<uint32> protectedCraftItemIds;
+    if (!BuildBridgeCraftProtectedItemIds(botAI, protectedCraftItemIds))
+    {
+        reason = "FAILED";
+        return 0;
+    }
     std::vector<ObjectGuid> itemGuids;
 
     // Snapshot GUIDs before native selling. Uncertainty means keep.
@@ -7624,7 +7623,7 @@ void RunQuestAbandonCommand(
         else
         {
             uint32 authorized = 0;
-            for (Player* const bot : GetBridgeVisibleBots(requester))
+            for (Player* const bot : GetBridgeVisibleBots(requester, true))
             {
                 if (!bot || bot->GetGroup() != group)
                     continue;
@@ -7901,7 +7900,7 @@ void RunGroupRollCommand(Player* requester, ChatMsg replyType, std::string const
         else
         {
             scope = group->isRaidGroup() ? "RAID" : "PARTY";
-            for (Player* const bot : GetBridgeVisibleBots(requester))
+            for (Player* const bot : GetBridgeVisibleBots(requester, true))
             {
                 if (!bot || bot->GetGroup() != group)
                     continue;
@@ -10174,7 +10173,7 @@ void RunGroupOrderCommand(
     uint32 failed = 0;
     bool limitExceeded = false;
 
-    for (Player* const bot : GetBridgeVisibleBots(requester))
+    for (Player* const bot : GetBridgeVisibleBots(requester, true))
     {
         if (!bot || bot->GetGroup() != requesterGroup)
             continue;
@@ -10280,7 +10279,7 @@ void RunGrindOrderCommand(
     uint32 failed = 0;
     bool limitExceeded = false;
 
-    for (Player* const bot : GetBridgeVisibleBots(requester))
+    for (Player* const bot : GetBridgeVisibleBots(requester, true))
     {
         if (!bot || bot->GetGroup() != requesterGroup)
             continue;
@@ -11305,7 +11304,7 @@ void RunGroupActionCommand(
     uint32 failed = 0;
     bool botLimitExceeded = false;
 
-    for (Player* const bot : GetBridgeVisibleBots(requester))
+    for (Player* const bot : GetBridgeVisibleBots(requester, true))
     {
         if (!bot || bot->GetGroup() != requesterGroup)
             continue;
@@ -11579,7 +11578,7 @@ void RunQuestAcceptAllCommand(
     uint32 accepted = 0;
     bool botLimitExceeded = false;
 
-    for (Player* const bot : GetBridgeVisibleBots(requester))
+    for (Player* const bot : GetBridgeVisibleBots(requester, true))
     {
         if (!bot || bot->GetGroup() != requesterGroup)
             continue;
@@ -11824,7 +11823,7 @@ void RunQuestTalkCommand(
 
 
 
-    for (Player* const bot : GetBridgeVisibleBots(requester))
+    for (Player* const bot : GetBridgeVisibleBots(requester, true))
 
     {
 
@@ -12689,7 +12688,7 @@ void RunRtscOrderCommand(
     uint32 failed = 0;
     bool botLimitExceeded = false;
 
-    for (Player* const bot : GetBridgeVisibleBots(requester))
+    for (Player* const bot : GetBridgeVisibleBots(requester, true))
     {
         if (!bot || bot->GetGroup() != requesterGroup)
             continue;
@@ -12891,7 +12890,7 @@ void RunAttackOrderCommand(
     uint32 failed = 0;
     bool botLimitExceeded = false;
 
-    for (Player* const bot : GetBridgeVisibleBots(requester))
+    for (Player* const bot : GetBridgeVisibleBots(requester, true))
     {
         if (!bot || bot->GetGroup() != requesterGroup)
             continue;
@@ -13865,7 +13864,7 @@ void RunStrategyMutationCommand(
     BotState const botState = stateScope == "C" ? BOT_STATE_COMBAT : BOT_STATE_NON_COMBAT;
     std::string const actionName = stateScope == "C" ? "co" : "nc";
 
-    for (Player* const bot : GetBridgeVisibleBots(requester))
+    for (Player* const bot : GetBridgeVisibleBotsForScope(requester, scope, target))
     {
         if (!BotMatchesCombatScope(requester, bot, scope, target))
             continue;
@@ -16763,7 +16762,7 @@ void SendFormationPackets(Player* requester, ChatMsg replyType, std::string cons
         Group* const requesterGroup = requester->GetGroup();
         if (requesterGroup)
         {
-            for (Player* const bot : GetBridgeVisibleBots(requester))
+            for (Player* const bot : GetBridgeVisibleBots(requester, true))
             {
                 if (!bot || bot->GetGroup() != requesterGroup)
                     continue;
@@ -16873,7 +16872,7 @@ void RunFormationCommand(Player* requester, ChatMsg replyType, std::string const
     Group* const requesterGroup = validRequest ? requester->GetGroup() : nullptr;
     if (requesterGroup)
     {
-        for (Player* const bot : GetBridgeVisibleBots(requester))
+        for (Player* const bot : GetBridgeVisibleBots(requester, true))
         {
             if (!bot || bot->GetGroup() != requesterGroup)
                 continue;
@@ -16907,7 +16906,7 @@ void RunRTICommand(Player* requester, ChatMsg replyType, std::string const& scop
 
     if (IsAllowedRTICommand(command) && (scope == "ALL" || scope == "GROUP" || scope == "BOT"))
     {
-        for (Player* const bot : GetBridgeVisibleBots(requester))
+        for (Player* const bot : GetBridgeVisibleBotsForScope(requester, scope, target))
         {
             if (!BotMatchesRTIScope(requester, bot, scope, target))
                 continue;
@@ -16940,7 +16939,7 @@ void RunCombatCommand(Player* requester, ChatMsg replyType, std::string const& s
 
     if (IsAllowedCombatCommand(command) && (scope == "ALL" || scope == "RAID" || scope == "GROUP" || scope == "PARTY" || scope == "BOT"))
     {
-        for (Player* const bot : GetBridgeVisibleBots(requester))
+        for (Player* const bot : GetBridgeVisibleBotsForScope(requester, scope, target))
         {
             if (!BotMatchesCombatScope(requester, bot, scope, target))
                 continue;
@@ -17083,7 +17082,7 @@ void RunSummonCommand(
         return;
     }
 
-    for (Player* const bot : GetBridgeVisibleBots(requester))
+    for (Player* const bot : GetBridgeVisibleBotsForScope(requester, scope, target))
     {
         if (!BotMatchesCombatScope(requester, bot, scope, target))
             continue;
@@ -17321,7 +17320,7 @@ void RunGroupOrderCommand(
         return;
     }
 
-    for (Player* const bot : GetBridgeVisibleBots(requester))
+    for (Player* const bot : GetBridgeVisibleBotsForScope(requester, scope, target))
     {
         if (!BotMatchesCombatScope(requester, bot, scope, target) ||
             !BotMatchesGroupOrderSelector(bot, selector))
@@ -17365,7 +17364,7 @@ void RunPositionCommand(Player* requester, ChatMsg replyType, std::string const&
 
     if (IsAllowedPositionCommand(command) && (scope == "ALL" || scope == "RAID" || scope == "GROUP" || scope == "PARTY" || scope == "BOT"))
     {
-        for (Player* const bot : GetBridgeVisibleBots(requester))
+        for (Player* const bot : GetBridgeVisibleBotsForScope(requester, scope, target))
         {
             if (!BotMatchesCombatScope(requester, bot, scope, target))
                 continue;
@@ -17419,7 +17418,7 @@ void RunLootRuleItemCommand(
     else
     {
         std::vector<PlayerbotAI*> selected;
-        for (Player* const bot : GetBridgeVisibleBots(requester))
+        for (Player* const bot : GetBridgeVisibleBotsForScope(requester, scope, target))
         {
             if (!BotMatchesCombatScope(requester, bot, scope, target))
                 continue;
@@ -17544,7 +17543,7 @@ void RunLootCommand(Player* requester, ChatMsg replyType, std::string const& sco
 
     if (IsAllowedLootCommand(command) && (scope == "ALL" || scope == "RAID" || scope == "GROUP" || scope == "PARTY" || scope == "BOT"))
     {
-        for (Player* const bot : GetBridgeVisibleBots(requester))
+        for (Player* const bot : GetBridgeVisibleBotsForScope(requester, scope, target))
         {
             if (!BotMatchesCombatScope(requester, bot, scope, target))
                 continue;
@@ -17696,7 +17695,7 @@ void AppendBridgeVisibleBot(Player* bot, std::vector<Player*>& bots, std::set<Ob
     bots.push_back(bot);
 }
 
-std::vector<Player*> GetBridgeVisibleBots(Player* player)
+std::vector<Player*> GetBridgeVisibleBots(Player* player, bool groupOnly)
 {
     std::vector<Player*> bots;
     std::set<ObjectGuid> seen;
@@ -17704,9 +17703,28 @@ std::vector<Player*> GetBridgeVisibleBots(Player* player)
     if (!player)
         return bots;
 
+    Group* const group = groupOnly ? player->GetGroup() : nullptr;
+    if (groupOnly && !group)
+        return bots;
+
     if (PlayerbotMgr* const mgr = sPlayerbotsMgr.GetPlayerbotMgr(player))
         for (PlayerBotMap::const_iterator it = mgr->GetPlayerBotsBegin(); it != mgr->GetPlayerBotsEnd(); ++it)
-            AppendBridgeVisibleBot(it->second, bots, seen);
+            if (!groupOnly || (it->second && it->second->GetGroup() == group))
+                AppendBridgeVisibleBot(it->second, bots, seen);
+
+    if (groupOnly)
+    {
+        std::set<ObjectGuid> members;
+        for (Group::MemberSlot const& member : group->GetMemberSlots())
+            members.insert(member.guid);
+        for (ObjectGuid const guid : members)
+        {
+            Player* const bot = sRandomPlayerbotMgr.GetPlayerBot(guid);
+            if (bot && bot->GetGroup() == group && CanExposeRandomHolderBot(player, bot))
+                AppendBridgeVisibleBot(bot, bots, seen);
+        }
+        return bots;
+    }
 
     for (PlayerBotMap::const_iterator it = sRandomPlayerbotMgr.GetPlayerBotsBegin(); it != sRandomPlayerbotMgr.GetPlayerBotsEnd(); ++it)
     {
@@ -17909,16 +17927,33 @@ void RunMaterialMailCommand(Player* requester, ChatMsg replyType, std::string co
 Player* FindBotByName(Player* player, std::string const& botName)
 {
     std::string const wantedName = Trim(botName);
-    if (wantedName.empty())
+    if (!player || wantedName.empty())
         return nullptr;
 
-    for (Player* const bot : GetBridgeVisibleBots(player))
-    {
-        if (bot->GetName() == wantedName)
+    ObjectGuid const guid = sCharacterCache->GetCharacterGuidByName(wantedName);
+    if (!guid)
+        return nullptr;
+
+    if (PlayerbotMgr* const mgr = sPlayerbotsMgr.GetPlayerbotMgr(player))
+        if (Player* const bot = mgr->GetPlayerBot(guid); bot && bot->IsInWorld() && bot->GetName() == wantedName)
             return bot;
-    }
+
+    Player* const bot = sRandomPlayerbotMgr.GetPlayerBot(guid);
+    if (bot && bot->IsInWorld() && bot->GetName() == wantedName && CanExposeRandomHolderBot(player, bot))
+        return bot;
 
     return nullptr;
+}
+
+std::vector<Player*> GetBridgeVisibleBotsForScope(Player* player, std::string const& scope, std::string const& target)
+{
+    if (scope == "BOT")
+    {
+        if (Player* const bot = FindBotByName(player, target))
+            return {bot};
+        return {};
+    }
+    return GetBridgeVisibleBots(player, scope == "GROUP" || scope == "PARTY" || scope == "RAID");
 }
 
 bool ConsumeWeaponEnchantDebugRateLimit(Player* requester)
@@ -19954,7 +19989,7 @@ void RunBotResetCommand(
     uint32 failed = 0;
     bool botLimitExceeded = false;
 
-    for (Player* const bot : GetBridgeVisibleBots(requester))
+    for (Player* const bot : GetBridgeVisibleBots(requester, true))
     {
         if (!bot || bot->GetGroup() != requesterGroup)
             continue;
@@ -20127,7 +20162,7 @@ void RunFleeOrderCommand(
     uint32 failed = 0;
     bool botLimitExceeded = false;
 
-    for (Player* const bot : GetBridgeVisibleBots(requester))
+    for (Player* const bot : GetBridgeVisibleBots(requester, true))
     {
         if (!bot || bot->GetGroup() != requesterGroup)
             continue;
@@ -23024,6 +23059,18 @@ if (requestType == "HUNTER_PET_MANAGE")
     return SendProtocolError(player, replyType, normalized, requestType, "", "UNKNOWN_RUN");
 }
 
+class MultiBotBridgeWorldScript final : public WorldScript
+{
+public:
+    MultiBotBridgeWorldScript() : WorldScript("MultiBotBridgeWorldScript", {WORLDHOOK_ON_STARTUP}) {}
+
+    void OnStartup() override
+    {
+        if (!GetBridgeCraftOutputsBySkill())
+            LOG_ERROR("playerbots", "MultiBotBridge could not load craft protection; SELL_VENDOR is disabled until restart");
+    }
+};
+
 class MultiBotBridgePlayerScript final : public PlayerScript
 {
 public:
@@ -23124,6 +23171,7 @@ public:
 
 void AddSC_multibot_bridge()
 {
+    new MultiBotBridgeWorldScript();
     if (BridgeConsoleLogsEnabled())
         LOG_INFO("server.loading", "mod-multibot-bridge loaded");
     new MultiBotBridgePlayerScript();
