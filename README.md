@@ -545,6 +545,8 @@ The project remains intentionally **bridge-first / mostly chatless** while the r
 
 The fork also retains `GROUP_ORDER_V1` for the companion addon's aggregate Follow / Stay / Flee / tank Attack workflow. This protocol remains available alongside the dedicated upstream order endpoints.
 
+The tank shield menu additionally sends `@tank pull` or `@tank pull back` through `GROUP_ORDER`. Both orders target the requester's selected unit and apply only to visible tanks controlled by that requester. They enable the native `pull` strategy, disable or enable `pull back` respectively, and invoke Playerbots' `PullMyTargetAction`. Pull back returns to the tank's starting position. The aggregate ACK reports whether Playerbots accepted the request, not whether the pull has finished. Update both Bridge and addon for these modes; older Bridge versions reject the new orders, and the addon does not fall back to chat for them.
+
 Deferred work is tracked in the addon roadmap:
 
 ### [`MultiBot-Chatless/docs/ROADMAP.md`](https://github.com/Wishmaster117/MultiBot-Chatless/blob/main/docs/ROADMAP.md)

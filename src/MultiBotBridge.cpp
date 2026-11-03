@@ -37,6 +37,7 @@
 #include "AiObjectContext.h"
 #include "AiFactory.h"
 #include "AttackAction.h"
+#include "PullActions.h"
 #include "Event.h"
 #include "EventProcessor.h"
 #include "Strategy.h"
@@ -17120,7 +17121,7 @@ bool TryNormalizeGroupOrder(
     command = ToLower(Trim(value));
     selector.clear();
 
-    if (command == "@tank do attack my target")
+    if (command == "@tank do attack my target" || command == "@tank pull" || command == "@tank pull back")
     {
         selector = "@tank";
     }
@@ -17227,7 +17228,7 @@ bool ApplyNativeGroupOrder(Player* requester, Player* bot, std::string const& co
         returnPosition.Reset();
         stayPosition.Reset();
     }
-    else if (command == "@tank do attack my target")
+    else if (command == "@tank do attack my target" || command == "@tank pull" || command == "@tank pull back")
     {
         if (botAI->GetMaster() != requester)
             return false;
@@ -17237,6 +17238,14 @@ bool ApplyNativeGroupOrder(Player* requester, Player* bot, std::string const& co
         botAI->ChangeStrategy("-passive", BOT_STATE_COMBAT);
         returnPosition.Reset();
         stayPosition.Reset();
+
+        if (command != "@tank do attack my target")
+        {
+            botAI->ChangeStrategy(command == "@tank pull back" ? "+pull,+pull back" : "+pull,-pull back",
+                BOT_STATE_COMBAT);
+            PullMyTargetAction pull(botAI);
+            return pull.Execute(Event("pull", "", requester));
+        }
 
         AttackMyTargetAction attack(botAI);
         if (!attack.Execute(Event()))
@@ -17308,7 +17317,7 @@ void RunGroupOrderCommand(
     }
 
     target = Trim(target);
-    if (command == "@tank do attack my target" && !requester->GetTarget())
+    if (selector == "@tank" && command != "@tank flee" && !requester->GetTarget())
     {
         SendGroupOrderAck(requester, replyType, scope, target, token, command, 0, 0, 0, "NO_TARGET");
         return;
