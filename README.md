@@ -56,6 +56,14 @@ The module does **not** expose an arbitrary Playerbots command executor.
 
 ---
 
+## Audit compatibility update (2026-11-06)
+
+Update this module and MultiBot Chatless together. `ITEM_IDENTITY_V1` binds exact
+bag actions to the unique Core item GUID; old mutation packets without a GUID are
+rejected. Read snapshots retain their existing frames and add item identity frames.
+`GEAR_ITEM_LINK_V1` supplies full instance item strings to PlayerbotManager; an older
+server uses native inspect there instead. No database migration is required.
+
 # Main Supported Areas
 
 | Area | Purpose |
