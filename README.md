@@ -636,3 +636,37 @@ Playerbots HEAD: 037c01418b5d01506917a3db9b44fd56ac5f965c
 ```
 
 `mod-playerbots` remains strictly read-only. The next work resumes the remaining automatic chat-path audit/cleanup; the external Beast Master module migration stays deferred until the very end of the main cleanup.
+
+
+### Smart inventory cleanup (`INVENTORY_CLEANUP_V1`)
+
+`RUN INVENTORY_CLEANUP~token~SMART_V1` performs one bounded batch for visible,
+authorized bots within 30 yards of the requester, with an interactable vendor per
+bot. Combat, trading, casting, death and missing vendors prevent processing.
+More than 128 visible bots reject the whole request before mutation; the existing
+10-second heavy-action cooldown and item-action replay protection apply.
+
+Only bag contents classified freshly as NONE, VENDOR, AH or DISENCHANT are
+eligible. The instance random property is included. Current quest objectives,
+quest source items and tools remain protected independently of AI classification,
+including completed turn-ins; unrewarded quest starters are preserved. Keys,
+Hearthstones, ammunition, class reagents, unique usable consumables, legendary or
+protected utility items, refundable/BOP-tradable/wrapped items, nonempty bags and
+items currently in trade/loot are kept. AI-marked equipment upgrades, useful
+supplies and profession items are also kept. Bank/equipped slots are excluded.
+
+Candidates with a positive sell price go through the native sell opcode. Candidates
+with no vendor value go through the native destroy opcode. Failed sales are kept,
+never converted into destruction. Successful stack operations are logged with
+requester, bot, entry, count and disposition; gold-cheat sale behavior is retained.
+
+Responses (counts are stacks, not individual units):
+
+```
+CLEANUP_BOT~token~encodedBotName~reason~sold~destroyed~failed
+CLEANUP_END~token~OK|PARTIAL|ERR~reason~processedBots~skippedBots~sold~destroyed~failed
+```
+
+`CLEANUP_END` is sent even if no bot can be processed. There is no automatic retry
+or database SQL migration. Check with `python3 tests/inventory_cleanup_test.py`;
+the harness executes shipped functions with fake Core objects and ASan/UBSan.

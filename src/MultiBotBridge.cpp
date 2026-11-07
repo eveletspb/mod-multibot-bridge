@@ -22,6 +22,7 @@
 #include "ObjectMgr.h"
 #include "Player.h"
 #include "QuestPackets.h"
+#include "QuestDef.h"
 #include "CharmInfo.h"
 #include "CreatureAI.h"
 #include "Pet.h"
@@ -456,6 +457,7 @@ bool SendCapabilitiesPackets(Player* player, ChatMsg chatType)
         kSummonCapability,
         kGroupOrderCapability,
         kMaterialMailCapability,
+        "INVENTORY_CLEANUP_V1",
         kOutfitCapability,
         kOutfitFramingCapability,
         kInventoryCapability,
@@ -17821,6 +17823,226 @@ std::vector<Player*> GetBridgeVisibleBots(Player* player, bool groupOnly)
     return bots;
 }
 
+// Only log-referenced quests protect their items; abandoned/rewarded quest leftovers can be cleaned.
+bool IsBridgeCleanupQuestItem(Player* bot, ItemTemplate const* proto)
+{
+    if (bot->HasQuestForItem(proto->ItemId))
+        return true;
+
+    std::set<uint32> requiredItems;
+    for (uint8 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
+    {
+        Quest const* const quest = sObjectMgr->GetQuestTemplate(bot->GetQuestSlotQuestId(slot));
+        if (!quest)
+            continue;
+
+        if (quest->GetSrcItemId() == proto->ItemId)
+            return true;
+        for (uint32 const itemId : quest->ItemDrop)
+            if (itemId == proto->ItemId)
+                return true;
+        for (uint32 const itemId : quest->RequiredItemId)
+        {
+            if (itemId == proto->ItemId)
+                return true;
+            if (itemId)
+                requiredItems.insert(itemId);
+        }
+    }
+
+    // Keep quest tools even when the required output is already ready to turn in.
+    for (auto const& spell : proto->Spells)
+    {
+        SpellInfo const* const info = sSpellMgr->GetSpellInfo(spell.SpellId);
+        if (!info)
+            continue;
+        for (auto const& effect : info->Effects)
+            if ((effect.Effect == SPELL_EFFECT_CREATE_ITEM || effect.Effect == SPELL_EFFECT_CREATE_ITEM_2) &&
+                requiredItems.count(effect.ItemType))
+                return true;
+    }
+    return false;
+}
+
+bool IsBridgeCleanupCandidate(Player* bot, PlayerbotAI* botAI, Item* item)
+{
+    if (!item || item->GetOwnerGUID() != bot->GetGUID() || item->IsInTrade() ||
+        item->IsRefundable() || item->IsBOPTradable() || item->IsWrapped() ||
+        item->IsNotEmptyBag() || bot->GetLootGUID() == item->GetGUID())
+        return false;
+
+    uint8 const bag = item->GetBagSlot();
+    uint8 const slot = item->GetSlot();
+    if (!((bag == INVENTORY_SLOT_BAG_0 && slot >= INVENTORY_SLOT_ITEM_START && slot < INVENTORY_SLOT_ITEM_END) ||
+        (bag >= INVENTORY_SLOT_BAG_START && bag < INVENTORY_SLOT_BAG_END)))
+        return false;
+
+    ItemTemplate const* const proto = item->GetTemplate();
+    if (!proto || item->GetEntry() == 6948 || proto->Class == ITEM_CLASS_KEY ||
+        proto->Class == ITEM_CLASS_PROJECTILE || proto->Class == ITEM_CLASS_REAGENT ||
+        proto->HasFlag(ITEM_FLAG_NO_USER_DESTROY) || proto->Quality >= ITEM_QUALITY_LEGENDARY)
+        return false;
+
+    // Utility items, mounts and pets are not disposable just because AI has no use for them.
+    if (proto->Class == ITEM_CLASS_MISC && proto->SubClass != ITEM_SUBCLASS_JUNK)
+        return false;
+    if (proto->Class == ITEM_CLASS_CONSUMABLE && proto->MaxCount > 0 && bot->CanUseItem(proto) == EQUIP_ERR_OK)
+        return false;
+    if (IsBridgeCleanupQuestItem(bot, proto))
+        return false;
+    if (proto->StartQuest && !bot->GetQuestRewardStatus(proto->StartQuest))
+        return false;
+
+    // Calculate afresh, including the instance suffix, as earlier stacks may have been removed.
+    ItemUsageValue usage(botAI);
+    usage.Qualify(std::to_string(item->GetEntry()) + "," + std::to_string(item->GetItemRandomPropertyId()));
+    switch (usage.Calculate())
+    {
+        case ITEM_USAGE_NONE:
+        case ITEM_USAGE_VENDOR:
+        case ITEM_USAGE_AH:
+        case ITEM_USAGE_DISENCHANT:
+            return true;
+        default:
+            return false;
+    }
+}
+
+void CleanupBridgeBagItems(Player* requester, Player* bot, Creature* vendor,
+    uint32& sold, uint32& destroyed, uint32& failed)
+{
+    std::vector<ObjectGuid> items;
+    for (uint8 slot = INVENTORY_SLOT_ITEM_START; slot < INVENTORY_SLOT_ITEM_END; ++slot)
+        if (Item* const item = bot->GetItemByPos(INVENTORY_SLOT_BAG_0, slot))
+            items.push_back(item->GetGUID());
+    for (uint8 bag = INVENTORY_SLOT_BAG_START; bag < INVENTORY_SLOT_BAG_END; ++bag)
+        if (Bag* const container = bot->GetBagByPos(bag))
+            for (uint32 slot = 0; slot < container->GetBagSize(); ++slot)
+                if (Item* const item = container->GetItemByPos(slot))
+                    items.push_back(item->GetGUID());
+
+    PlayerbotAI* const botAI = GetBotAI(bot);
+    for (ObjectGuid const guid : items)
+    {
+        Item* const item = bot->GetItemByGuid(guid);
+        if (!IsBridgeCleanupCandidate(bot, botAI, item))
+            continue;
+        if (!bot->GetNPCIfCanInteractWith(vendor->GetGUID(), UNIT_NPC_FLAG_VENDOR))
+        {
+            ++failed;
+            break;
+        }
+
+        uint8 const bag = item->GetBagSlot();
+        uint8 const slot = item->GetSlot();
+        uint32 const entry = item->GetEntry();
+        uint32 const count = item->GetCount();
+        bool const canSell = item->GetTemplate()->SellPrice > 0;
+        if (canSell)
+        {
+            uint32 const moneyBefore = bot->GetMoney();
+            WorldPacket packet(CMSG_SELL_ITEM);
+            packet << vendor->GetGUID() << guid << uint32(0);
+            WorldPackets::Item::SellItem sellPacket(std::move(packet));
+            sellPacket.Read();
+            bot->GetSession()->HandleSellItemOpcode(sellPacket);
+            if (botAI->HasCheat(BotCheatMask::gold))
+                bot->SetMoney(moneyBefore);
+        }
+        else
+        {
+            WorldPacket packet(CMSG_DESTROYITEM, 6);
+            packet << item->GetBagSlot() << item->GetSlot()
+                << uint8(0) << uint8(0) << uint8(0) << uint8(0);
+            WorldPackets::Item::DestroyItem destroyPacket(std::move(packet));
+            destroyPacket.Read();
+            bot->GetSession()->HandleDestroyItemOpcode(destroyPacket);
+        }
+
+        // A failed native sale (script veto, money cap, etc.) must never fall back to destruction.
+        if (Item* const remaining = bot->GetItemByPos(bag, slot); remaining && remaining->GetGUID() == guid)
+        {
+            ++failed;
+            continue;
+        }
+        if (canSell)
+            ++sold;
+        else
+            ++destroyed;
+        LOG_INFO("playerbots", "InventoryCleanup requester={} bot={} item={} count={} action={}",
+            requester->GetName(), bot->GetName(), entry, count, canSell ? "sold" : "destroyed");
+    }
+}
+
+void RunInventoryCleanupCommand(Player* requester, ChatMsg replyType, std::string const& token)
+{
+    std::string reason = "OK";
+    uint32 processed = 0, skipped = 0, sold = 0, destroyed = 0, failed = 0;
+    if (!requester || !requester->GetSession() || !requester->IsInWorld() || !requester->IsAlive())
+        reason = "REQUESTER_UNAVAILABLE";
+    else if (requester->IsInCombat())
+        reason = "IN_COMBAT";
+    else if (!ConsumeItemActionRateLimit(requester) || !ConsumeSelfBotHeavyActionRateLimit(requester))
+        reason = "RATE_LIMIT";
+    else if (!RegisterItemActionToken(requester, token))
+        reason = "DUPLICATE";
+    else
+    {
+        std::vector<Player*> const bots = GetBridgeVisibleBots(requester);
+        if (bots.size() > kMaxStateBots)
+            reason = "TOO_MANY_BOTS";
+        else
+        {
+            for (Player* const bot : bots)
+            {
+                std::string botReason = "OK";
+                Creature* vendor = nullptr;
+                PlayerbotAI* const botAI = GetBotAI(bot);
+                if (bot == requester || !CanControlBridgeBot(requester, bot))
+                    botReason = "FORBIDDEN";
+                else if (!bot->GetSession() || !bot->IsAlive() || !botAI->GetAiObjectContext())
+                    botReason = "BOT_UNAVAILABLE";
+                else if (!requester->IsWithinDistInMap(bot, 30.0f))
+                    botReason = "TOO_FAR";
+                else if (bot->IsInCombat() || bot->GetTradeData() || bot->IsNonMeleeSpellCast(false))
+                    botReason = "BOT_BUSY";
+                else if (!(vendor = FindNearbyInteractiveVendor(bot)) ||
+                    vendor->HasFlagsExtra(CREATURE_FLAG_EXTRA_NO_SELL_VENDOR))
+                    botReason = "VENDOR_NOT_FOUND";
+
+                uint32 botSold = 0, botDestroyed = 0, botFailed = 0;
+                if (botReason == "OK")
+                {
+                    CleanupBridgeBagItems(requester, bot, vendor, botSold, botDestroyed, botFailed);
+                    ++processed;
+                    sold += botSold;
+                    destroyed += botDestroyed;
+                    failed += botFailed;
+                    if (botFailed)
+                        botReason = "ITEM_FAILED";
+                }
+                else
+                    ++skipped;
+
+                std::ostringstream row;
+                row << token << kFieldSeparator << UrlEncodeField(bot->GetName())
+                    << kFieldSeparator << botReason << kFieldSeparator << botSold
+                    << kFieldSeparator << botDestroyed << kFieldSeparator << botFailed;
+                SendStateAddonPacket(requester, replyType, "CLEANUP_BOT", row.str());
+            }
+            if (!processed)
+                reason = "NO_ELIGIBLE_BOTS";
+            else if (skipped || failed)
+                reason = "PARTIAL";
+        }
+    }
+    std::ostringstream result;
+    result << token << kFieldSeparator << (processed ? (reason == "OK" ? "OK" : "PARTIAL") : "ERR")
+        << kFieldSeparator << reason << kFieldSeparator << processed << kFieldSeparator << skipped
+        << kFieldSeparator << sold << kFieldSeparator << destroyed << kFieldSeparator << failed;
+    SendStateAddonPacket(requester, replyType, "CLEANUP_END", result.str());
+}
+
 enum class MaterialMailAdmission
 {
     Accepted,
@@ -21533,6 +21755,19 @@ bool HandleBridgeOpcode(Player* player, ChatMsg replyType, std::string const& op
         }
 
         return SendProtocolError(player, replyType, normalized, requestType, "", "UNKNOWN_GET");
+    }
+
+    if (requestType == "INVENTORY_CLEANUP")
+    {
+        std::string const token = GetSafeErrorToken(fields, 1);
+        if (fields.size() != 3)
+            return SendProtocolError(player, replyType, normalized, requestType, token, "BAD_FIELD_COUNT");
+        if (!IsValidRequestToken(fields[1]))
+            return SendProtocolError(player, replyType, normalized, requestType, "", "BAD_TOKEN");
+        if (fields[2] != "SMART_V1")
+            return SendProtocolError(player, replyType, normalized, requestType, token, "BAD_PRESET");
+        RunInventoryCleanupCommand(player, replyType, fields[1]);
+        return true;
     }
 
     if (requestType == "GROUP_MATERIAL_MAIL")
