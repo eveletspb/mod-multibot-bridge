@@ -649,8 +649,15 @@ More than 128 visible bots reject the whole request before mutation; the existin
 Only bag contents classified freshly as NONE, VENDOR, AH or DISENCHANT are
 eligible. The instance random property is included. Current quest objectives,
 quest source items and tools remain protected independently of AI classification,
-including completed turn-ins; unrewarded quest starters are preserved. Keys,
-Hearthstones, ammunition, class reagents, unique usable consumables, legendary or
+including completed turn-ins; unrewarded quest starters are preserved. Quest-class
+or quest-bound tools with item spells are always kept, because later quest-chain
+steps can depend on them without listing their item id. This intentionally keeps
+some old quest tools; absence from the quest log does not prove they are obsolete.
+All usable consumables (including flasks, elixirs, scrolls and food) are kept,
+including excess stacks. Every item id in any saved Playerbots outfit is kept,
+including alternate/resistance sets and all copies with different random suffixes.
+Fishing poles, miscellaneous weapon tools and items with a TotemCategory are kept.
+Keys, Hearthstones, ammunition, class reagents, legendary or
 protected utility items, refundable/BOP-tradable/wrapped items, nonempty bags and
 items currently in trade/loot are kept. AI-marked equipment upgrades, useful
 supplies and profession items are also kept. Bank/equipped slots are excluded.
@@ -669,4 +676,10 @@ CLEANUP_END~token~OK|PARTIAL|ERR~reason~processedBots~skippedBots~sold~destroyed
 
 `CLEANUP_END` is sent even if no bot can be processed. There is no automatic retry
 or database SQL migration. Check with `python3 tests/inventory_cleanup_test.py`;
-the harness executes shipped functions with fake Core objects and ASan/UBSan.
+the harness executes shipped bridge functions and the real Playerbots
+`ItemUsageValue::Calculate`, consumable classification and qualifier parsing, with
+fake Core objects and ASan/UBSan. A sibling `mod-playerbots` checkout is required.
+Equipment and skill decisions remain controlled test fixtures. Regression cases
+cover Ghost Revealer 22115 with quests 8960/9032, usable zero/nonzero-price buffs,
+saved outfits/copies, profession tools, direct/source/sixth-slot quest objectives,
+and a mixed batch that removes old junk while keeping those protected items.

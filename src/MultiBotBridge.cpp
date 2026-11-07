@@ -17823,9 +17823,14 @@ std::vector<Player*> GetBridgeVisibleBots(Player* player, bool groupOnly)
     return bots;
 }
 
-// Only log-referenced quests protect their items; abandoned/rewarded quest leftovers can be cleaned.
 bool IsBridgeCleanupQuestItem(Player* bot, ItemTemplate const* proto)
 {
+    // Tools can span quest-chain steps without a direct quest-template link.
+    if (proto->Class == ITEM_CLASS_QUEST || proto->Bonding == BIND_QUEST_ITEM)
+        for (auto const& spell : proto->Spells)
+            if (spell.SpellId)
+                return true;
+
     if (bot->HasQuestForItem(proto->ItemId))
         return true;
 
@@ -17864,7 +17869,23 @@ bool IsBridgeCleanupQuestItem(Player* bot, ItemTemplate const* proto)
     return false;
 }
 
-bool IsBridgeCleanupCandidate(Player* bot, PlayerbotAI* botAI, Item* item)
+std::set<uint32> GetBridgeCleanupOutfitItemIds(PlayerbotAI* botAI)
+{
+    std::set<uint32> itemIds;
+    auto const& outfits = botAI->GetAiObjectContext()->GetValue<std::vector<std::string>&>("outfit list")->Get();
+    for (std::string const& outfit : outfits)
+    {
+        size_t const separator = outfit.find('=');
+        if (separator == std::string::npos)
+            continue;
+        for (uint32 const entry : ParseOutfitItemEntries(outfit.substr(separator + 1)))
+            itemIds.insert(entry);
+    }
+    return itemIds;
+}
+
+bool IsBridgeCleanupCandidate(Player* bot, PlayerbotAI* botAI, Item* item,
+    std::set<uint32> const& outfitItemIds)
 {
     if (!item || item->GetOwnerGUID() != bot->GetGUID() || item->IsInTrade() ||
         item->IsRefundable() || item->IsBOPTradable() || item->IsWrapped() ||
@@ -17883,12 +17904,16 @@ bool IsBridgeCleanupCandidate(Player* bot, PlayerbotAI* botAI, Item* item)
         proto->HasFlag(ITEM_FLAG_NO_USER_DESTROY) || proto->Quality >= ITEM_QUALITY_LEGENDARY)
         return false;
 
+    if (proto->TotemCategory || (proto->Class == ITEM_CLASS_WEAPON &&
+        (proto->SubClass == ITEM_SUBCLASS_WEAPON_MISC || proto->SubClass == ITEM_SUBCLASS_WEAPON_FISHING_POLE)))
+        return false;
+
     // Utility items, mounts and pets are not disposable just because AI has no use for them.
     if (proto->Class == ITEM_CLASS_MISC && proto->SubClass != ITEM_SUBCLASS_JUNK)
         return false;
-    if (proto->Class == ITEM_CLASS_CONSUMABLE && proto->MaxCount > 0 && bot->CanUseItem(proto) == EQUIP_ERR_OK)
+    if (proto->Class == ITEM_CLASS_CONSUMABLE && bot->CanUseItem(proto) == EQUIP_ERR_OK)
         return false;
-    if (IsBridgeCleanupQuestItem(bot, proto))
+    if (outfitItemIds.count(item->GetEntry()) || IsBridgeCleanupQuestItem(bot, proto))
         return false;
     if (proto->StartQuest && !bot->GetQuestRewardStatus(proto->StartQuest))
         return false;
@@ -17922,10 +17947,11 @@ void CleanupBridgeBagItems(Player* requester, Player* bot, Creature* vendor,
                     items.push_back(item->GetGUID());
 
     PlayerbotAI* const botAI = GetBotAI(bot);
+    std::set<uint32> const outfitItemIds = GetBridgeCleanupOutfitItemIds(botAI);
     for (ObjectGuid const guid : items)
     {
         Item* const item = bot->GetItemByGuid(guid);
-        if (!IsBridgeCleanupCandidate(bot, botAI, item))
+        if (!IsBridgeCleanupCandidate(bot, botAI, item, outfitItemIds))
             continue;
         if (!bot->GetNPCIfCanInteractWith(vendor->GetGUID(), UNIT_NPC_FLAG_VENDOR))
         {
